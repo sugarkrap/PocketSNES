@@ -127,6 +127,20 @@ static inline void arm_str_imm(ArmEmit *e, int Rd, int Rn, unsigned off12)
 	arm_emit(e, 0xE5800000u | ((uint32_t)Rn << 16) | ((uint32_t)Rd << 12) | (off12 & 0xFFF));
 }
 
+/* Byte load/store (immediate offset). The snes9x flag fields _Carry/_Zero/
+ * _Negative/_Overflow are 1-byte (uint8_32 == unsigned char) and adjacent, so
+ * they MUST be touched with byte ops -- a word STR clobbers the neighbours.
+ * LDRB Rd,[Rn,#off] -- base 0xE5D00000.  STRB Rd,[Rn,#off] -- base 0xE5C00000. */
+static inline void arm_ldrb_imm(ArmEmit *e, int Rd, int Rn, unsigned off12)
+{
+	arm_emit(e, 0xE5D00000u | ((uint32_t)Rn << 16) | ((uint32_t)Rd << 12) | (off12 & 0xFFF));
+}
+
+static inline void arm_strb_imm(ArmEmit *e, int Rd, int Rn, unsigned off12)
+{
+	arm_emit(e, 0xE5C00000u | ((uint32_t)Rn << 16) | ((uint32_t)Rd << 12) | (off12 & 0xFFF));
+}
+
 /* Halfword load/store (immediate offset, 0..255) -- the 65816 register file's
  * pairs are 16-bit. LDRH zero-extends into the 32-bit ARM reg.
  * LDRH Rd,[Rn,#off]  -- base 0xE1D000B0 (P=1,U=1,I=1,W=0,L=1, SH=01).

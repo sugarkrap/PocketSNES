@@ -74,11 +74,12 @@ static void tr_epilogue(ArmEmit *e)
 	arm_pop(e, TR_SAVES | (1u << ARM_PC));
 }
 
-/* icpu->_Carry = v  (v is 0 or 1) */
+/* icpu->_Carry = v  (v is 0 or 1). BYTE store: the flag fields are 1-byte and
+ * adjacent (uint8_32 == unsigned char); a word store would clobber _Zero etc. */
 static void tr_set_carry(ArmEmit *e, int v)
 {
 	arm_mov_imm8(e, TR_TMP, (uint32_t)v);
-	arm_str_imm(e, TR_TMP, TR_ICPU, offsetof(struct SICPU, _Carry));
+	arm_strb_imm(e, TR_TMP, TR_ICPU, offsetof(struct SICPU, _Carry));
 }
 
 /* cpu->Cycles += n */

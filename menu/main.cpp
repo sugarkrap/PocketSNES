@@ -17,6 +17,9 @@
 #ifdef PIKO_DYNAREC_PROFILE
 #include "dynarec_block.h"
 #endif
+#ifdef PIKO_DYNAREC_VERIFY
+#include "dynarec_verify.h"
+#endif
 
 #define SNES_SCREEN_WIDTH  256
 #define SNES_SCREEN_HEIGHT 192
@@ -663,6 +666,15 @@ int mainEntry(int argc, char* argv[])
 	if (getenv("PIKO_DYN_PROFILE")) {
 		dyn_cache_init();
 		dyn_profile_on = 1;
+	}
+#endif
+#ifdef PIKO_DYNAREC_VERIFY
+	/* VERIFY build: PIKO_DYN_VERIFY=1 diffs each translatable opcode's generated
+	 * block against the interpreter on live game code. Interpreter stays
+	 * authoritative; the generated code only touches a scratch copy. */
+	if (getenv("PIKO_DYN_VERIFY")) {
+		dyn_verify_init();
+		dyn_verify_on = 1;
 	}
 #endif
 

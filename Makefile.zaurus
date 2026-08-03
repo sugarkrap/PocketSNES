@@ -94,6 +94,15 @@ CFLAGS   += -DPIKO_DYNAREC_PROFILE
 CXXFLAGS += -DPIKO_DYNAREC_PROFILE
 endif
 
+# `make VERIFY=1` builds the dynarec run-both-and-diff validator into the CPU
+# loop (gated at runtime by PIKO_DYN_VERIFY): each translatable opcode's
+# generated block is run on a scratch copy and diffed against the interpreter.
+# The interpreter stays authoritative; nothing about behaviour/timing changes.
+ifdef VERIFY
+CFLAGS   += -DPIKO_DYNAREC_VERIFY
+CXXFLAGS += -DPIKO_DYNAREC_VERIFY
+endif
+
 LDFLAGS = $(CXXFLAGS) \
 		-L$(DEPS_STAGE)/usr/lib -Wl,-rpath-link=$(DEPS_STAGE)/usr/lib \
 		-Wl,-rpath-link=$(SDL_STAGE)/usr/lib \

@@ -185,9 +185,20 @@ default until it's proven; the shipped binary stays the known-good interpreter.
     C fn preserves them. Self-test runs native CLC / fallback / native SEC —
     **PASS on hardware** (A round-trips through the fallback, flags/cycles/PC
     correct). New encoders: `MOV32` (4-insn const), `ORR #imm`, `BLX`.
-  - [ ] Run-both-and-diff gate, then translate the rest of the hot set
-    (`LDA/STA/STZ`, branches, `CMP/CPY`, `INX/INY/DEX/DEC`, `ASL`, `XBA`,
-    `JSR/RTS`, `PHA/PLA`), one opcode at a time.
+  - [x] **Live run-both-and-diff** (`make VERIFY=1`, `PIKO_DYN_VERIFY=1`,
+    `dynarec_verify.cpp`): for each translatable opcode in the *real* CPU loop,
+    run the generated block on a scratch copy and diff against the interpreter's
+    effect on the live state. Interpreter stays authoritative; generated code
+    only touches the copy. **Immediately earned its keep** — caught native CLC
+    diverging on the `Z` flag: the flag fields are 1-byte (`uint8_32 == unsigned
+    char`) and adjacent, and a word `STR` to `_Carry` was clobbering
+    `_Zero/_Negative/_Overflow`. Fixed with `STRB`; **0 divergences** after, on
+    the same code path that failed immediately before.
+  - [ ] Translate the rest of the hot set (`LDA/STA/STZ`, branches, `CMP/CPY`,
+    `INX/INY/DEX/DEC`, `ASL`, `XBA`, `JSR/RTS`, `PHA/PLA`), one opcode at a time,
+    each gated by the validator above.
+  - [ ] Block-driven execution (the recompiler actually drives the CPU) — the
+    speed win, once enough opcodes are native; gated + validator-green first.
   - [ ] Idle-loop detection for the boot spin (`$FA:00F9` CLC/LDA/BPL).
 - [ ] **Step 4 — Memory fast paths** (inline RAM/ROM; MMIO → C handlers) and
   ALU/addressing modes.
@@ -279,4 +290,5 @@ hardware. Two regimes:
 | `dynarec_block.{h,c}` | 65816 decoder, block discovery, block cache. |
 | `dynarec_harness.{h,c}` | CPU-state snapshot/diff + WRAM hash (correctness net). |
 | `dynarec_translate.cpp` | 65816 → ARM block translator (`.cpp` for `offsetof` on snes9x structs). |
+| `dynarec_verify.cpp` | Live run-both-and-diff validator (`make VERIFY=1`). |
 | `README.md`  | This document. |

@@ -54,6 +54,9 @@
 #ifdef PIKO_DYNAREC_PROFILE
 #include "dynarec_block.h"
 #endif
+#ifdef PIKO_DYNAREC_VERIFY
+#include "dynarec_verify.h"
+#endif
 #ifdef THREADCPU
 void S9xMainLoop (struct SRegisters * reg, struct SICPU * icpu, struct SCPUState * cpu)
 {
@@ -159,8 +162,24 @@ void S9xMainLoop (void)
 #else
 		CPU.Cycles += ICPU.Speed [*CPU.PC];
 #endif
+#ifdef PIKO_DYNAREC_VERIFY
+		/* run-both-and-diff: snapshot AFTER the cycle add (so the native and
+		 * interpreter cycle baselines match) but BEFORE the opcode runs. */
+		unsigned char _vop = 0; int _vdo = 0;
+		if (dyn_verify_on) {
+			_vop = *CPU.PC;
+			if (dyn_verify_translatable(_vop)) {
+				dyn_verify_before(&Registers, &ICPU, &CPU);
+				_vdo = 1;
+			}
+		}
+#endif
 		(*ICPU.S9xOpcodes [*CPU.PC++].S9xOpcode) (&Registers, &ICPU, &CPU);
-	
+#ifdef PIKO_DYNAREC_VERIFY
+		if (_vdo)
+			dyn_verify_after(_vop, &Registers, &ICPU, &CPU);
+#endif
+
 		if (SA1.Executing)
 			S9xSA1MainLoop ();
 		DO_HBLANK_CHECK();
