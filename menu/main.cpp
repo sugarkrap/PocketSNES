@@ -153,6 +153,7 @@ bool8_32 S9xDeinitUpdate (int Width, int Height, bool8_32)
 	}
 
 	sal_VideoFlip(0);
+	return TRUE;   /* non-void: must return (missing return here is UB, same class as S9xOpenSoundDevice) */
 }
 
 const char *S9xGetFilename (const char *ex)
@@ -359,7 +360,17 @@ void S9xSaveSRAM (int showWarning)
 
 bool8_32 S9xOpenSoundDevice(int a, unsigned char b, int c)
 {
-
+	/*
+	 * Stub: the actual audio device is opened by sal_AudioInit() (sal_sound.c),
+	 * not here -- this snes9x hook only needs to report success so S9xInitSound()
+	 * proceeds. It was left with an empty body, which for a non-void function is
+	 * undefined behaviour: at -O2 on ARM execution runs off the end of the
+	 * function into whatever follows, which manifested as a wild re-entry into
+	 * mainEntry() (with the sample rate as a bogus argc) the moment S9xInitSound
+	 * called it. Return a value.
+	 */
+	(void)a; (void)b; (void)c;
+	return (1);
 }
 
 void S9xAutoSaveSRAM (void)
@@ -631,11 +642,12 @@ int mainEntry(int argc, char* argv[])
 
 	s32 event=EVENT_NONE;
 
+
 	sal_Init();
 	sal_VideoInit(16,SAL_RGB(0,0,0),Memory.ROMFramesPerSecond);
 
 	mRomName[0]=0;
-	if (argc >= 2) 
+	if (argc >= 2)
  		strcpy(mRomName, argv[1]); // Record ROM name
 
 	MenuInit(sal_DirectoryGetHome(), &mMenuOptions);
@@ -657,7 +669,7 @@ int mainEntry(int argc, char* argv[])
 		{
 			if(mTempState) free(mTempState);
 			mTempState=NULL;
-			if(SnesRomLoad() == SAL_ERROR) 
+			if(SnesRomLoad() == SAL_ERROR)
 			{
 				MenuMessageBox("Failed to load rom",mRomName,"Press any button to continue", MENU_MESSAGE_BOX_MODE_PAUSE);
 				sal_Reset();
