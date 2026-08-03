@@ -76,6 +76,18 @@ static inline void arm_add_reg(ArmEmit *e, int Rd, int Rn, int Rm)
 	arm_add_reg_lsl(e, Rd, Rn, Rm, 0);
 }
 
+/* ADD Rd, Rn, #imm8  -- base 0xE2800000 (I=1, opcode ADD, rot=0). */
+static inline void arm_add_imm8(ArmEmit *e, int Rd, int Rn, uint32_t imm8)
+{
+	arm_emit(e, 0xE2800000u | ((uint32_t)Rn << 16) | ((uint32_t)Rd << 12) | (imm8 & 0xFF));
+}
+
+/* MOV Rd, Rm  (register)  -- base 0xE1A00000. */
+static inline void arm_mov_reg(ArmEmit *e, int Rd, int Rm)
+{
+	arm_emit(e, 0xE1A00000u | ((uint32_t)Rd << 12) | ((uint32_t)Rm & 0xF));
+}
+
 /* ---- load / store (immediate offset) --------------------------------- *
  * These are the primitives the recompiler will use to spill/reload the
  * 65816 register file (SRegisters) at block boundaries.
@@ -89,6 +101,22 @@ static inline void arm_ldr_imm(ArmEmit *e, int Rd, int Rn, unsigned off12)
 static inline void arm_str_imm(ArmEmit *e, int Rd, int Rn, unsigned off12)
 {
 	arm_emit(e, 0xE5800000u | ((uint32_t)Rn << 16) | ((uint32_t)Rd << 12) | (off12 & 0xFFF));
+}
+
+/* Halfword load/store (immediate offset, 0..255) -- the 65816 register file's
+ * pairs are 16-bit. LDRH zero-extends into the 32-bit ARM reg.
+ * LDRH Rd,[Rn,#off]  -- base 0xE1D000B0 (P=1,U=1,I=1,W=0,L=1, SH=01).
+ * STRH Rd,[Rn,#off]  -- base 0xE1C000B0 (L=0). off split into two nibbles. */
+static inline void arm_ldrh_imm(ArmEmit *e, int Rd, int Rn, unsigned off8)
+{
+	arm_emit(e, 0xE1D000B0u | ((uint32_t)Rn << 16) | ((uint32_t)Rd << 12)
+	            | ((off8 & 0xF0u) << 4) | (off8 & 0x0Fu));
+}
+
+static inline void arm_strh_imm(ArmEmit *e, int Rd, int Rn, unsigned off8)
+{
+	arm_emit(e, 0xE1C000B0u | ((uint32_t)Rn << 16) | ((uint32_t)Rd << 12)
+	            | ((off8 & 0xF0u) << 4) | (off8 & 0x0Fu));
 }
 
 /* ---- block transfer (prologue/epilogue) ------------------------------ *
@@ -115,6 +143,50 @@ static inline void arm_bx(ArmEmit *e, int Rm)
 static inline void arm_bx_lr(ArmEmit *e)
 {
 	arm_bx(e, ARM_LR);
+}
+
+/* ---- block register ABI ---------------------------------------------- *
+ * A translated block is an ARM function `void block(void *regfile)`:
+ *   - r0 on entry = pointer to the 65816 register file (SRegisters).
+ * The hot guest registers live in fixed callee-saved ARM regs for the block's
+ * duration; the prologue loads them from the struct and the epilogue spills
+ * them back. Callee-saved regs we clobber (r4-r8) are preserved via push/pop.
+ *
+ *   r8 = regfile base pointer
+ *   r4 = A   r5 = X   r6 = Y   r7 = P
+ *
+ * Field byte-offsets are passed in (rather than hardcoded) so this stays
+ * decoupled from the real SRegisters layout and unit-testable against a local
+ * struct; the translator supplies offsetof(SRegisters, ...) at Step 3. */
+#define ARM_GUEST_A    ARM_R4
+#define ARM_GUEST_X    ARM_R5
+#define ARM_GUEST_Y    ARM_R6
+#define ARM_GUEST_P    ARM_R7
+#define ARM_REGFILE    ARM_R8
+
+typedef struct {
+	unsigned a, x, y, p;   /* byte offsets of the .W fields in the reg file */
+} ArmGuestOffsets;
+
+/* push {r4-r8, lr} ; r8 = r0 ; load A/X/Y/P from [r8, #off] */
+static inline void arm_emit_block_prologue(ArmEmit *e, const ArmGuestOffsets *o)
+{
+	arm_push(e, (1u<<ARM_R4)|(1u<<ARM_R5)|(1u<<ARM_R6)|(1u<<ARM_R7)|(1u<<ARM_R8)|(1u<<ARM_LR));
+	arm_mov_reg(e, ARM_REGFILE, ARM_R0);
+	arm_ldrh_imm(e, ARM_GUEST_A, ARM_REGFILE, o->a);
+	arm_ldrh_imm(e, ARM_GUEST_X, ARM_REGFILE, o->x);
+	arm_ldrh_imm(e, ARM_GUEST_Y, ARM_REGFILE, o->y);
+	arm_ldrh_imm(e, ARM_GUEST_P, ARM_REGFILE, o->p);
+}
+
+/* store A/X/Y/P back to [r8, #off] ; pop {r4-r8, pc} (returns) */
+static inline void arm_emit_block_epilogue(ArmEmit *e, const ArmGuestOffsets *o)
+{
+	arm_strh_imm(e, ARM_GUEST_A, ARM_REGFILE, o->a);
+	arm_strh_imm(e, ARM_GUEST_X, ARM_REGFILE, o->x);
+	arm_strh_imm(e, ARM_GUEST_Y, ARM_REGFILE, o->y);
+	arm_strh_imm(e, ARM_GUEST_P, ARM_REGFILE, o->p);
+	arm_pop(e, (1u<<ARM_R4)|(1u<<ARM_R5)|(1u<<ARM_R6)|(1u<<ARM_R7)|(1u<<ARM_R8)|(1u<<ARM_PC));
 }
 
 #endif /* PIKO_DYNAREC_ARM_H */

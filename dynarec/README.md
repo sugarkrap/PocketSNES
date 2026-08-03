@@ -159,8 +159,11 @@ default until it's proven; the shipped binary stays the known-good interpreter.
   - [ ] **Run-both-and-diff** deferred to Step 3: it needs recompiled code to
     compare the interpreter against, so it lands as the per-opcode gate there
     (capture `DynCpuSnap` live, run block both ways, diff).
-- [ ] **Step 2 — Emitter register ABI + prologue/epilogue.** Map `A/X/Y/P` to
-  ARM regs; block entry/exit spill/reload against `SRegisters`.
+- [x] **Step 2 — Emitter register ABI + prologue/epilogue.** Guest `A/X/Y/P`
+  pinned to `r4/r5/r6/r7`, regfile base in `r8`; block is `void blk(void*
+  regfile)` (r0), prologue `push {r4-r8,lr}` + `LDRH` loads, epilogue `STRH`
+  spills + `pop {r4-r8,pc}`. Added `LDRH/STRH/ADD#imm/MOV reg` encoders.
+  **Done — round-trip PASSes on real hardware.**
 - [ ] **Step 3 — Translate the trivial opcodes**, each gated by the harness:
   register transfers (`TAX/TAY/TXA…`), immediate loads (`LDA/LDX/LDY #`), flag
   ops (`SEC/CLC/SEI`; `REP/SEP` as block-enders). Everything else still calls

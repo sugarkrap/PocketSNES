@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stddef.h>
 #include <errno.h>
 #include <sys/mman.h>
 
@@ -141,6 +142,58 @@ static int dyn_offline_tests(void)
 	return ok;
 }
 
+/* Step 2: emit a full block (prologue + body + epilogue) using the register
+ * ABI and verify the guest reg file round-trips. Body does A += 1, so we prove
+ * A is loaded, mutated and spilled while X/Y/P are loaded and spilled intact. */
+struct dyn_abi_regs { uint16_t A, X, Y, P; };
+typedef void (*fn_p_v)(void *);
+
+static int dyn_abi_test(void)
+{
+	const size_t BUFSZ = 4096;
+	void *buf = dyn_code_alloc(BUFSZ);
+	ArmEmit e;
+	ArmGuestOffsets off;
+	fn_p_v blk;
+	struct dyn_abi_regs r;
+	int ok = 1;
+
+	if (!buf) {
+		fprintf(stderr, "PIKO-DYN ABI test: FAIL (RWX mmap: %s)\n", strerror(errno));
+		return 0;
+	}
+	off.a = offsetof(struct dyn_abi_regs, A);
+	off.x = offsetof(struct dyn_abi_regs, X);
+	off.y = offsetof(struct dyn_abi_regs, Y);
+	off.p = offsetof(struct dyn_abi_regs, P);
+
+	arm_emit_init(&e, buf, BUFSZ / 4);
+	blk = (fn_p_v)(void *)e.cur;
+	arm_emit_block_prologue(&e, &off);
+	arm_add_imm8(&e, ARM_GUEST_A, ARM_GUEST_A, 1);   /* A += 1 */
+	arm_emit_block_epilogue(&e, &off);
+
+	if (e.overflow) {
+		fprintf(stderr, "PIKO-DYN ABI test: FAIL (code buffer overflow)\n");
+		dyn_code_free(buf, BUFSZ);
+		return 0;
+	}
+	dyn_code_commit(buf, (char *)buf + arm_emit_count(&e) * 4);
+
+	r.A = 0x1234; r.X = 0x5678; r.Y = 0x9ABC; r.P = 0x00FF;
+	blk(&r);
+
+	if (r.A != 0x1235) { fprintf(stderr, "PIKO-DYN ABI: A=%04X want 1235\n", r.A); ok = 0; }
+	if (r.X != 0x5678) { fprintf(stderr, "PIKO-DYN ABI: X=%04X want 5678\n", r.X); ok = 0; }
+	if (r.Y != 0x9ABC) { fprintf(stderr, "PIKO-DYN ABI: Y=%04X want 9ABC\n", r.Y); ok = 0; }
+	if (r.P != 0x00FF) { fprintf(stderr, "PIKO-DYN ABI: P=%04X want 00FF\n", r.P); ok = 0; }
+
+	fprintf(stderr, "PIKO-DYN ABI test: %s (%u words: prologue+body+epilogue "
+	        "round-trip A/X/Y/P)\n", ok ? "PASS" : "FAIL", arm_emit_count(&e));
+	dyn_code_free(buf, BUFSZ);
+	return ok;
+}
+
 int S9xDynSelfTest(void)
 {
 	const size_t BUFSZ = 4096;
@@ -194,6 +247,10 @@ int S9xDynSelfTest(void)
 
 	/* Step 1 offline unit tests (decoder / block discovery / cache / harness) */
 	if (!dyn_offline_tests())
+		ok = 0;
+
+	/* Step 2: register-ABI prologue/epilogue round-trip */
+	if (!dyn_abi_test())
 		ok = 0;
 
 	return ok;
