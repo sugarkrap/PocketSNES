@@ -86,6 +86,14 @@ CFLAGS = $(INCLUDE) -DRC_OPTIMIZED -D__LINUX__ \
 # match the dialect this was written against; go back to the one it was.
 CXXFLAGS = $(CFLAGS) -std=gnu++03 -fno-exceptions -fno-rtti
 
+# `make PROFILE=1` builds the dynarec hotness profiler into the CPU dispatch
+# (opcode histogram + hot-block counting), gated at runtime by PIKO_DYN_PROFILE.
+# Default builds omit it entirely -- the hot loop is byte-identical without it.
+ifdef PROFILE
+CFLAGS   += -DPIKO_DYNAREC_PROFILE
+CXXFLAGS += -DPIKO_DYNAREC_PROFILE
+endif
+
 LDFLAGS = $(CXXFLAGS) \
 		-L$(DEPS_STAGE)/usr/lib -Wl,-rpath-link=$(DEPS_STAGE)/usr/lib \
 		-Wl,-rpath-link=$(SDL_STAGE)/usr/lib \

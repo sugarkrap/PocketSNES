@@ -62,6 +62,24 @@ DynBlock *dyn_cache_insert(const DynBlock *b);
 /* Number of live entries (diagnostics/tests). */
 unsigned  dyn_cache_count(void);
 
+/* ---- hotness profiler (observation only; see PIKO_DYNAREC_PROFILE) ------ *
+ * A gated, behaviour-neutral probe for answering "where does the CPU actually
+ * spend its time in real games" before we translate a single opcode:
+ *   - dyn_opcount[op]  : how often each opcode executes (what to translate 1st)
+ *   - block-start hits : hot (PC,mode) blocks (via the cache's hit counter)
+ * Enable at runtime with dyn_profile_on (set from PIKO_DYN_PROFILE in
+ * mainEntry). Only compiled/called in PROFILE builds. */
+extern int dyn_profile_on;
+
+/* Called once per dispatched instruction (PROFILE builds only). `op` is the
+ * current opcode byte, `pc` its 24-bit guest address, m8/x8 the live mode.
+ * Counts the opcode and, at block starts, bumps the block's hit count; dumps
+ * a top-N summary to stderr every few hundred thousand instructions. */
+void dyn_profile_op(uint8_t op, uint32_t pc, int m8, int x8);
+
+/* Print the hottest opcodes (with mnemonics) and hottest blocks to stderr. */
+void dyn_profile_dump(unsigned top_ops, unsigned top_blocks);
+
 #ifdef __cplusplus
 }
 #endif

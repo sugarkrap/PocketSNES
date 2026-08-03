@@ -200,3 +200,101 @@ unsigned dyn_cache_count(void)
 {
 	return cache_count;
 }
+
+/* ---- hotness profiler -------------------------------------------------- */
+#include <stdio.h>
+
+int dyn_profile_on = 0;
+
+static unsigned long dyn_opcount[256];
+static unsigned long dyn_note_counter;
+static int           dyn_bs_pending = 1;   /* first instruction is a block start */
+
+/* 65816 mnemonics, copied from snes9x's disassembler (debug.cpp) for readable
+ * dumps. Index = opcode byte. */
+static const char *dyn_mnem[256] = {
+	"BRK","ORA","COP","ORA","TSB","ORA","ASL","ORA","PHP","ORA","ASL","PHD","TSB","ORA","ASL","ORA",
+	"BPL","ORA","ORA","ORA","TRB","ORA","ASL","ORA","CLC","ORA","INC","TCS","TRB","ORA","ASL","ORA",
+	"JSR","AND","JSL","AND","BIT","AND","ROL","AND","PLP","AND","ROL","PLD","BIT","AND","ROL","AND",
+	"BMI","AND","AND","AND","BIT","AND","ROL","AND","SEC","AND","DEC","TSC","BIT","AND","ROL","AND",
+	"RTI","EOR","WDM","EOR","MVP","EOR","LSR","EOR","PHA","EOR","LSR","PHK","JMP","EOR","LSR","EOR",
+	"BVC","EOR","EOR","EOR","MVN","EOR","LSR","EOR","CLI","EOR","PHY","TCD","JML","EOR","LSR","EOR",
+	"RTS","ADC","PER","ADC","STZ","ADC","ROR","ADC","PLA","ADC","ROR","RTL","JMP","ADC","ROR","ADC",
+	"BVS","ADC","ADC","ADC","STZ","ADC","ROR","ADC","SEI","ADC","PLY","TDC","JMP","ADC","ROR","ADC",
+	"BRA","STA","BRL","STA","STY","STA","STX","STA","DEY","BIT","TXA","PHB","STY","STA","STX","STA",
+	"BCC","STA","STA","STA","STY","STA","STX","STA","TYA","STA","TXS","TXY","STZ","STA","STZ","STA",
+	"LDY","LDA","LDX","LDA","LDY","LDA","LDX","LDA","TAY","LDA","TAX","PLB","LDY","LDA","LDX","LDA",
+	"BCS","LDA","LDA","LDA","LDY","LDA","LDX","LDA","CLV","LDA","TSX","TYX","LDY","LDA","LDX","LDA",
+	"CPY","CMP","REP","CMP","CPY","CMP","DEC","CMP","INY","CMP","DEX","WAI","CPY","CMP","DEC","CMP",
+	"BNE","CMP","CMP","CMP","PEI","CMP","DEC","CMP","CLD","CMP","PHX","STP","JML","CMP","DEC","CMP",
+	"CPX","SBC","SEP","SBC","CPX","SBC","INC","SBC","INX","SBC","NOP","XBA","CPX","SBC","INC","SBC",
+	"BEQ","SBC","SBC","SBC","PEA","SBC","INC","SBC","SED","SBC","PLX","XCE","JSR","SBC","INC","SBC"
+};
+
+void dyn_profile_op(uint8_t op, uint32_t pc, int m8, int x8)
+{
+	dyn_opcount[op]++;
+
+	if (dyn_bs_pending) {
+		DynBlock *b = dyn_cache_find(pc, m8, x8);
+		if (!b) {
+			DynBlock nb;
+			memset(&nb, 0, sizeof(nb));
+			nb.start_pc = pc;
+			nb.m8 = (uint8_t)(m8 ? 1 : 0);
+			nb.x8 = (uint8_t)(x8 ? 1 : 0);
+			b = dyn_cache_insert(&nb);
+		}
+		if (b) b->hits++;
+		dyn_bs_pending = 0;
+	}
+	if (dyn_op_is_block_end(op))
+		dyn_bs_pending = 1;
+
+	if ((++dyn_note_counter % 1000000UL) == 0)
+		dyn_profile_dump(16, 12);
+}
+
+void dyn_profile_dump(unsigned top_ops, unsigned top_blocks)
+{
+	unsigned i, k;
+	unsigned long total = 0;
+
+	for (i = 0; i < 256; i++) total += dyn_opcount[i];
+	if (total == 0) return;
+
+	fprintf(stderr, "\n=== PIKO-DYN profile (%lu instructions, %u blocks) ===\n",
+	        total, dyn_cache_count());
+
+	fprintf(stderr, "-- hottest opcodes --\n");
+	{
+		uint8_t done[256]; memset(done, 0, sizeof(done));
+		for (k = 0; k < top_ops; k++) {
+			int best = -1; unsigned long bestv = 0;
+			for (i = 0; i < 256; i++)
+				if (!done[i] && dyn_opcount[i] > bestv) { bestv = dyn_opcount[i]; best = (int)i; }
+			if (best < 0) break;
+			done[best] = 1;
+			fprintf(stderr, "  %02X %-4s %8lu  %5.1f%%\n",
+			        best, dyn_mnem[best], dyn_opcount[best],
+			        100.0 * (double)dyn_opcount[best] / (double)total);
+		}
+	}
+
+	fprintf(stderr, "-- hottest blocks --\n");
+	for (k = 0; k < top_blocks; k++) {
+		unsigned bi = 0; uint32_t bestv = 0; int found = 0;
+		for (i = 0; i < DYN_CACHE_SLOTS; i++)
+			if (cache_used[i] && cache_slot[i].n_insns != 0xFFFF /*not yet printed*/ &&
+			    cache_slot[i].hits > bestv) { bestv = cache_slot[i].hits; bi = i; found = 1; }
+		if (!found) break;
+		fprintf(stderr, "  $%02X:%04X m%d x%d  %6u hits\n",
+		        (cache_slot[bi].start_pc >> 16) & 0xFF,
+		        cache_slot[bi].start_pc & 0xFFFF,
+		        cache_slot[bi].m8, cache_slot[bi].x8, cache_slot[bi].hits);
+		cache_slot[bi].n_insns = 0xFFFF;   /* mark printed (profiler doesn't use n_insns) */
+	}
+	/* clear the printed-marks so a later dump works again */
+	for (i = 0; i < DYN_CACHE_SLOTS; i++)
+		if (cache_used[i] && cache_slot[i].n_insns == 0xFFFF) cache_slot[i].n_insns = 0;
+}

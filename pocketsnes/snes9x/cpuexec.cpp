@@ -51,6 +51,9 @@
 #include "dma.h"
 #include "fxemu.h"
 #include "sa1.h"
+#ifdef PIKO_DYNAREC_PROFILE
+#include "dynarec_block.h"
+#endif
 #ifdef THREADCPU
 void S9xMainLoop (struct SRegisters * reg, struct SICPU * icpu, struct SCPUState * cpu)
 {
@@ -140,6 +143,16 @@ void S9xMainLoop (void)
 		} //if (CPU.Flags)
 #ifdef CPU_SHUTDOWN
 		CPU.PCAtOpcodeStart = CPU.PC;
+#endif
+#ifdef PIKO_DYNAREC_PROFILE
+		/* dynarec hotness probe: observation only (counters), reads just the
+		 * current opcode byte -- no look-ahead, no OOB. Runtime-gated. */
+		if (dyn_profile_on)
+			dyn_profile_op(*CPU.PC,
+			               ((uint32)Registers.PB << 16)
+			                   | (uint16)(CPU.PC - CPU.PCBase),
+			               (Registers.P.W & MemoryFlag) != 0,
+			               (Registers.P.W & IndexFlag) != 0);
 #endif
 #ifdef VAR_CYCLES
 		CPU.Cycles += CPU.MemSpeed;

@@ -14,6 +14,9 @@
 #include "snapshot.h"
 #include "savestateio.h"
 #include "dynarec.h"
+#ifdef PIKO_DYNAREC_PROFILE
+#include "dynarec_block.h"
+#endif
 
 #define SNES_SCREEN_WIDTH  256
 #define SNES_SCREEN_HEIGHT 192
@@ -653,6 +656,15 @@ int mainEntry(int argc, char* argv[])
 		int ok = S9xDynSelfTest();
 		exit(ok ? 0 : 1);
 	}
+#ifdef PIKO_DYNAREC_PROFILE
+	/* PROFILE build: PIKO_DYN_PROFILE=1 turns on the observation-only opcode/
+	 * hot-block probe in the CPU dispatch; it dumps a summary to stderr
+	 * periodically (every ~1M instructions). */
+	if (getenv("PIKO_DYN_PROFILE")) {
+		dyn_cache_init();
+		dyn_profile_on = 1;
+	}
+#endif
 
 	sal_Init();
 	sal_VideoInit(16,SAL_RGB(0,0,0),Memory.ROMFramesPerSecond);

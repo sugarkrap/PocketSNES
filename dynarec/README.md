@@ -113,6 +113,25 @@ interpreter's per-instruction dispatch for near-native execution on hot paths.
   direct access); MMIO ranges call the C `S9xGetByte`/`S9xSetByte` handlers so
   their side effects still fire.
 
+- **Translation (instruction) cache** — the RWX code buffer (Step 0) + the
+  block cache (Step 1) together *are* the instruction cache: guest block →
+  translated native code. It must be **invalidated** when the underlying guest
+  bytes change — SNES games run code from WRAM (profiling confirms hot blocks in
+  bank `$7E`, below) and remap banks — or the CPU would run stale translations.
+  Track which guest pages a block was translated from and drop affected blocks
+  on writes to those pages / on bank remaps.
+
+- **AOT dry-run (pre-pass)** — before/while running, statically walk the ROM to
+  pre-populate the cache and "feed the loop". This is a **control-flow
+  traversal**, not a linear sweep: seed a worklist from the reset/NMI/IRQ
+  vectors, decode each block to its ender, enqueue its statically-known
+  successors (branch/call/jump targets), repeat. It cannot be a naive
+  decode-every-byte pass — ROM data aliases as valid opcodes — and it cannot be
+  complete (indirect jumps, computed targets, RAM code are undecidable
+  statically). So it is a *seed*: the runtime JIT still fills whatever the
+  static pass can't reach. Hybrid AOT + JIT. The Step 1 decoder is exactly the
+  machinery this pre-pass runs on.
+
 ---
 
 ## 4. Build order (and current status)
@@ -134,11 +153,12 @@ default until it's proven; the shipped binary stays the known-good interpreter.
     (incl. cycles) + WRAM FNV hash.
   - [x] Offline unit tests for all of the above, run under `PIKO_JIT_SELFTEST`.
     **PASS on real hardware.**
-  - [ ] **Live wiring** (remaining): capture `DynCpuSnap` from the running CPU;
-    hook `S9xMainLoop` to execute cached blocks via the interpreter fn-pointers
-    with identical per-instruction event checks; run-both-and-diff mode; per-
-    block hotness dump. This is the behaviourally-risky part and lands behind
-    the harness above, default-off.
+  - [x] **Live hotness profiler** (`make PROFILE=1`, `PIKO_DYN_PROFILE=1`):
+    observation-only opcode histogram + hot-block counter hooked into the CPU
+    dispatch, default-compiled-out. **Run on FF6 — findings in section 7.**
+  - [ ] **Run-both-and-diff** deferred to Step 3: it needs recompiled code to
+    compare the interpreter against, so it lands as the per-opcode gate there
+    (capture `DynCpuSnap` live, run block both ways, diff).
 - [ ] **Step 2 — Emitter register ABI + prologue/epilogue.** Map `A/X/Y/P` to
   ARM regs; block entry/exit spill/reload against `SRegisters`.
 - [ ] **Step 3 — Translate the trivial opcodes**, each gated by the harness:
@@ -196,7 +216,36 @@ unaffected.
 
 ---
 
-## 7. Files
+## 7. Profiling findings (FF6, `PIKO_DYN_PROFILE`)
+
+First real run — FF6 boot into the opening, ~17M instructions observed on
+hardware. Two regimes:
+
+- **Boot idle-loop.** For the first ~9M instructions one block dominates
+  everything: `$FA:00F9` (`CLC / LDA $xxxx / BPL` — a spin-wait on a hardware
+  flag), with `CLC`/`LDA`/`BPL` each at exactly 33.3%. Classic emulator idle
+  loop. The big win here isn't translating it fast, it's **detecting the idle
+  loop and skipping to the next event** (cf. snes9x's `CPU_SHUTDOWN`); worth a
+  dedicated pass.
+
+- **Game logic.** Once running, the hot-opcode set is small and clear — the
+  **translate-first list for Step 3** (covers the large majority of dynamic
+  instructions):
+  - loads: `LDA` (`AD/A5/B7/B9`)
+  - stores: `STA` (`8D/9D/8F`), `STZ` (`9C`)
+  - flags/branches: `CLC`, `BPL/BNE/BEQ/BMI`
+  - compares: `CMP` (`CD`), `CPY` (`C4/C0`)
+  - inc/dec & index: `INY/INX/DEX/DEY/DEC` (`C8/E8/CA/C6`), `ASL` (`0A`)
+  - misc: `XBA` (`EB`), `JSR/RTS`, `PHA/PLA`
+
+- **Mode.** Overwhelmingly `M=1,X=0` (8-bit accumulator, 16-bit index) at boot,
+  mixing `M=0` later. Start with both accumulator widths; index-16 is common.
+
+- **Code in RAM.** Hot blocks appear in bank `$7E` (WRAM) — FF6 executes code
+  it copies into RAM. Confirms the **translation cache must invalidate on
+  writes** to code pages (see architecture). Not an afterthought.
+
+## 8. Files
 
 | File | Role |
 |------|------|
