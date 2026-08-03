@@ -16,6 +16,8 @@
 
 #include "dynarec.h"
 #include "dynarec_arm.h"
+#include "dynarec_block.h"
+#include "dynarec_harness.h"
 
 #ifndef MAP_ANONYMOUS
 #ifdef MAP_ANON
@@ -50,6 +52,94 @@ static void dyn_code_commit(void *start, void *end)
 
 typedef int (*fn_ii_i)(int, int);   /* int f(int, int) */
 typedef int (*fn_v_i)(void);        /* int g(void)     */
+
+/* ---- Step 1 offline unit tests: decoder, block discovery, cache, harness.
+ * Pure computation, no snes9x/emulator state -- safe to run over SSH. Prints
+ * each failure; returns 1 if all pass. */
+#define DYN_CHECK(cond, msg) \
+	do { if (!(cond)) { fprintf(stderr, "PIKO-DYN test FAIL: %s\n", (msg)); ok = 0; } } while (0)
+
+static int dyn_offline_tests(void)
+{
+	int ok = 1;
+
+	/* --- decoder: mode-dependent immediate widths --- */
+	DYN_CHECK(dyn_op_length(0xEA, 1, 1) == 1, "NOP length");             /* implied */
+	DYN_CHECK(dyn_op_length(0xA9, 1, 1) == 2, "LDA# 8-bit length");      /* imm[M], M8 */
+	DYN_CHECK(dyn_op_length(0xA9, 0, 1) == 3, "LDA# 16-bit length");     /* imm[M], M16 */
+	DYN_CHECK(dyn_op_length(0xA2, 1, 1) == 2, "LDX# 8-bit length");      /* imm[X], X8 */
+	DYN_CHECK(dyn_op_length(0xA2, 1, 0) == 3, "LDX# 16-bit length");     /* imm[X], X16 */
+	DYN_CHECK(dyn_op_length(0x4C, 1, 1) == 3, "JMP abs length");
+	DYN_CHECK(dyn_op_length(0xAF, 1, 1) == 4, "LDA long length");        /* absolute long */
+
+	/* --- decoder: block-ender classification --- */
+	DYN_CHECK(!dyn_op_is_block_end(0xEA), "NOP not ender");
+	DYN_CHECK(!dyn_op_is_block_end(0xA9), "LDA# not ender");
+	DYN_CHECK( dyn_op_is_block_end(0x4C), "JMP is ender");
+	DYN_CHECK( dyn_op_is_block_end(0x60), "RTS is ender");
+	DYN_CHECK( dyn_op_is_block_end(0xF0), "BEQ is ender");
+	DYN_CHECK( dyn_op_is_block_end(0xC2), "REP is ender (mode change)");
+	DYN_CHECK( dyn_op_is_block_end(0x20), "JSR is ender");
+
+	/* --- block discovery: NOP; LDA #$34; NOP; JMP $8000  (M8) --- */
+	{
+		static const uint8_t code[] = { 0xEA, 0xA9, 0x34, 0xEA, 0x4C, 0x00, 0x80 };
+		DynBlock b;
+		int n = dyn_discover_block(code, 0x008000, /*m8*/1, /*x8*/1, &b);
+		DYN_CHECK(n == 4,            "discover: 4 instructions");
+		DYN_CHECK(b.length == 7,     "discover: 7 bytes");
+		DYN_CHECK(b.end_op == 0x4C,  "discover: ends on JMP");
+		DYN_CHECK(b.start_pc == 0x008000, "discover: start pc");
+	}
+	/* same code, 16-bit accumulator -> LDA# is 3 bytes, so JMP shifts out of a
+	 * 7-byte window; discovery should read the extra immediate byte as part of
+	 * LDA and re-frame the stream (proves width feeds the walker). */
+	{
+		static const uint8_t code[] = { 0xA9, 0x34, 0x12, 0x60 };  /* LDA #$1234 ; RTS */
+		DynBlock b;
+		int n = dyn_discover_block(code, 0x018000, /*m8*/0, /*x8*/1, &b);
+		DYN_CHECK(n == 2,           "discover16: 2 instructions");
+		DYN_CHECK(b.length == 4,    "discover16: 4 bytes (LDA#16 + RTS)");
+		DYN_CHECK(b.end_op == 0x60, "discover16: ends on RTS");
+	}
+
+	/* --- block cache: insert / find / mode-keying --- */
+	{
+		DynBlock b, *p;
+		memset(&b, 0, sizeof(b));
+		b.start_pc = 0x00ABCD; b.m8 = 1; b.x8 = 0; b.n_insns = 3;
+		dyn_cache_init();
+		DYN_CHECK(dyn_cache_count() == 0, "cache empty after init");
+		p = dyn_cache_insert(&b);
+		DYN_CHECK(p != 0,                        "cache insert");
+		DYN_CHECK(dyn_cache_count() == 1,        "cache count 1");
+		DYN_CHECK(dyn_cache_find(0x00ABCD, 1, 0) == p, "cache find hit");
+		DYN_CHECK(dyn_cache_find(0x00ABCD, 0, 0) == 0, "cache find miss (mode differs)");
+		DYN_CHECK(dyn_cache_insert(&b) == p,     "cache re-insert returns same");
+		DYN_CHECK(dyn_cache_count() == 1,        "cache count still 1");
+	}
+
+	/* --- harness: diff + hash --- */
+	{
+		DynCpuSnap a, c;
+		const char *what = 0;
+		memset(&a, 0, sizeof(a));
+		a.A = 0x1234; a.PC = 0x8000; a.cycles = 42;
+		c = a;
+		DYN_CHECK(dyn_cpu_diff(&a, &c, &what) == 1, "harness: identical match");
+		c.A = 0x1235;
+		DYN_CHECK(dyn_cpu_diff(&a, &c, &what) == 0, "harness: detects A diff");
+		DYN_CHECK(what && what[0] == 'A',           "harness: names A");
+		c = a; c.cycles = 43;
+		DYN_CHECK(dyn_cpu_diff(&a, &c, &what) == 0 && what[0] == 'c', "harness: detects cycles");
+
+		DYN_CHECK(dyn_hash("hello", 5) == dyn_hash("hello", 5), "hash deterministic");
+		DYN_CHECK(dyn_hash("hello", 5) != dyn_hash("hellp", 5), "hash distinguishes");
+	}
+
+	fprintf(stderr, "PIKO-DYN offline tests: %s\n", ok ? "PASS" : "FAIL");
+	return ok;
+}
 
 int S9xDynSelfTest(void)
 {
@@ -101,5 +191,10 @@ int S9xDynSelfTest(void)
 	        ok ? "PASS" : "FAIL", f_words, (void *)f, g_words);
 
 	dyn_code_free(buf, BUFSZ);
+
+	/* Step 1 offline unit tests (decoder / block discovery / cache / harness) */
+	if (!dyn_offline_tests())
+		ok = 0;
+
 	return ok;
 }

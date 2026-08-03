@@ -124,13 +124,21 @@ default until it's proven; the shipped binary stays the known-good interpreter.
   code at all (RWX mmap + correct ARMv5 encodings + I-cache flush + host call
   convention). `dynarec_arm.h` emitter + `S9xDynSelfTest()`.
   **Done — PASSes on real hardware** (`f(3,4)=10`, `g()=42`).
-- [ ] **Step 1 — Block cache skeleton (recompile nothing) + correctness
-  harness.** Block cache, keying, discovery to block-enders; execute the block
-  by calling the *interpreter* fn-pointers with identical per-instruction event
-  checks (provably identical behaviour, zero assembly). Harness: run each block
-  both ways, diff `SRegisters` + `CPU.Cycles` + a RAM hash, abort on first
-  divergence with the offending PC/opcode. Also the natural home for per-block
-  hotness profiling (which PCs to translate first).
+- **Step 1 — Block cache skeleton (recompile nothing) + correctness harness.**
+  - [x] **Decoder** (`dynarec_block.*`): mode-aware 65816 instruction lengths
+    (reusing snes9x's `AddrModes[256]`) + block-ender classification.
+  - [x] **Block discovery**: walk a straight-line run to the first block-ender.
+  - [x] **Block cache**: open-addressing hash keyed on `(PC, M, X)` with hit
+    counting (hotness).
+  - [x] **Harness core** (`dynarec_harness.*`): `DynCpuSnap` + `dyn_cpu_diff`
+    (incl. cycles) + WRAM FNV hash.
+  - [x] Offline unit tests for all of the above, run under `PIKO_JIT_SELFTEST`.
+    **PASS on real hardware.**
+  - [ ] **Live wiring** (remaining): capture `DynCpuSnap` from the running CPU;
+    hook `S9xMainLoop` to execute cached blocks via the interpreter fn-pointers
+    with identical per-instruction event checks; run-both-and-diff mode; per-
+    block hotness dump. This is the behaviourally-risky part and lands behind
+    the harness above, default-off.
 - [ ] **Step 2 — Emitter register ABI + prologue/epilogue.** Map `A/X/Y/P` to
   ARM regs; block entry/exit spill/reload against `SRegisters`.
 - [ ] **Step 3 — Translate the trivial opcodes**, each gated by the harness:
@@ -193,9 +201,8 @@ unaffected.
 | File | Role |
 |------|------|
 | `dynarec_arm.h` | ARMv5TE instruction emitter (RWX-buffer writes). The assembler. |
-| `dynarec.c` | RWX code buffer + I-cache flush + `S9xDynSelfTest()`. |
+| `dynarec.c` | RWX code buffer + I-cache flush + `S9xDynSelfTest()` (JIT + Step 1 offline tests). |
 | `dynarec.h`  | Public interface. |
+| `dynarec_block.{h,c}` | 65816 decoder, block discovery, block cache. |
+| `dynarec_harness.{h,c}` | CPU-state snapshot/diff + WRAM hash (correctness net). |
 | `README.md`  | This document. |
-
-Next files (Step 1): the block cache + translator (`dynarec_block.*`) and the
-correctness harness.
