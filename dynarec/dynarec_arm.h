@@ -88,6 +88,30 @@ static inline void arm_mov_reg(ArmEmit *e, int Rd, int Rm)
 	arm_emit(e, 0xE1A00000u | ((uint32_t)Rd << 12) | ((uint32_t)Rm & 0xF));
 }
 
+/* ORR Rd, Rn, #imm8 ROR (2*rot)  -- base 0xE3800000 (I=1, opcode ORR=1100). */
+static inline void arm_orr_imm(ArmEmit *e, int Rd, int Rn, uint32_t imm8, uint32_t rot)
+{
+	arm_emit(e, 0xE3800000u | ((uint32_t)Rn << 16) | ((uint32_t)Rd << 12)
+	            | ((rot & 0xF) << 8) | (imm8 & 0xFF));
+}
+
+/* Materialise an arbitrary 32-bit constant into Rd (ARMv5 has no single-insn
+ * form): MOV low byte, then ORR the other three byte-lanes in with rotations
+ * 12/8/4 (i.e. <<8, <<16, <<24). Always 4 instructions. */
+static inline void arm_mov32(ArmEmit *e, int Rd, uint32_t v)
+{
+	arm_mov_imm8(e, Rd, v & 0xFF);
+	arm_orr_imm(e, Rd, Rd, (v >> 8)  & 0xFF, 12);
+	arm_orr_imm(e, Rd, Rd, (v >> 16) & 0xFF, 8);
+	arm_orr_imm(e, Rd, Rd, (v >> 24) & 0xFF, 4);
+}
+
+/* BLX Rm  -- call through a register, setting LR (ARMv5TE). base 0xE12FFF30. */
+static inline void arm_blx(ArmEmit *e, int Rm)
+{
+	arm_emit(e, 0xE12FFF30u | ((uint32_t)Rm & 0xF));
+}
+
 /* ---- load / store (immediate offset) --------------------------------- *
  * These are the primitives the recompiler will use to spill/reload the
  * 65816 register file (SRegisters) at block boundaries.

@@ -179,9 +179,12 @@ default until it's proven; the shipped binary stays the known-good interpreter.
     matching block ABI + prologue/epilogue; native emission for **CLC/SEC/NOP**
     (CLC is a top-3 hottest opcode). Offline self-test translates `CLC;SEC;CLC`
     and runs it — **PASS on hardware** (`_Carry`, cycles, A/X/Y all correct).
-  - [ ] Hybrid interpreter-fallback emission (spill pinned regs → struct, set
-    guest PC, call the opcode fn, reload) so blocks with un-translated opcodes
-    still run — the prerequisite for live wiring.
+  - [x] Hybrid interpreter-fallback emission: spill pinned A/X/Y → struct, set
+    `cpu->PC` past the opcode, `BLX` the interpreter fn (r0/r1/r2 = reg/icpu/cpu),
+    reload A/X/Y. reg/icpu/cpu (r8/r9/r10) + pcbase (r7) are callee-saved so the
+    C fn preserves them. Self-test runs native CLC / fallback / native SEC —
+    **PASS on hardware** (A round-trips through the fallback, flags/cycles/PC
+    correct). New encoders: `MOV32` (4-insn const), `ORR #imm`, `BLX`.
   - [ ] Run-both-and-diff gate, then translate the rest of the hot set
     (`LDA/STA/STZ`, branches, `CMP/CPY`, `INX/INY/DEX/DEC`, `ASL`, `XBA`,
     `JSR/RTS`, `PHA/PLA`), one opcode at a time.
