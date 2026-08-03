@@ -13,6 +13,7 @@
 #include "soundux.h"
 #include "snapshot.h"
 #include "savestateio.h"
+#include "dynarec.h"
 
 #define SNES_SCREEN_WIDTH  256
 #define SNES_SCREEN_HEIGHT 192
@@ -642,6 +643,16 @@ int mainEntry(int argc, char* argv[])
 
 	s32 event=EVENT_NONE;
 
+	/* Dynarec runtime-codegen self-test. Runs BEFORE sal_Init(), so it touches
+	 * no framebuffer or input and is safe over a plain SSH shell:
+	 *   PIKO_JIT_SELFTEST=1 ./PocketSNES
+	 * Proves emit-and-run native code works on this PXA255 before we build the
+	 * 65816 translator on top. Exits with the result; never falls through to
+	 * the emulator. */
+	if (getenv("PIKO_JIT_SELFTEST")) {
+		int ok = S9xDynSelfTest();
+		exit(ok ? 0 : 1);
+	}
 
 	sal_Init();
 	sal_VideoInit(16,SAL_RGB(0,0,0),Memory.ROMFramesPerSecond);

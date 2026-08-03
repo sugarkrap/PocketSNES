@@ -65,7 +65,7 @@ endif
 INCLUDE = -I pocketsnes \
 		-I sal/linux/include -I sal/include \
 		-I pocketsnes/include \
-		-I menu -I pocketsnes/linux -I pocketsnes/snes9x \
+		-I menu -I pocketsnes/linux -I pocketsnes/snes9x -I dynarec \
 		-I$(DEPS_STAGE)/usr/include -I$(DEPS_STAGE)/usr/include/libpng16
 
 # Same -Os + armv5te/xscale/soft-float choice as ../../Makefile.zaurus.
@@ -92,7 +92,7 @@ LDFLAGS = $(CXXFLAGS) \
 		-Wl,-rpath,/mnt/card/.zaurus/usr/lib \
 		-lpthread -lz -lpng -lm $(SDL_LIBS)
 
-SOURCE = pocketsnes/snes9x menu sal/linux sal
+SOURCE = pocketsnes/snes9x menu sal/linux sal dynarec
 SRC_CPP = $(foreach dir, $(SOURCE), $(wildcard $(dir)/*.cpp))
 SRC_C   = $(foreach dir, $(SOURCE), $(wildcard $(dir)/*.c))
 OBJ_CPP = $(patsubst %.cpp, %.o, $(SRC_CPP))
