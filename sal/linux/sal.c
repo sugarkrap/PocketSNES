@@ -84,6 +84,23 @@ static u16  *mFrameBuf        = NULL;
 /* one doubled fb row, built in cached memory then burst-copied out */
 static unsigned int *blit_row = NULL;
 
+/*
+ * Per-page shadow of what each fb page currently displays, in the source's
+ * own 320x240x16 form. sal_VideoFlip compares each source scanline against
+ * it and skips rows the page already shows (and narrows changed rows to just
+ * the differing span), so a mostly-static screen -- an RPG field/menu -- only
+ * pays for the pixels that actually moved instead of a full 640x480 uncached
+ * blit every frame.
+ *
+ * It has to be PER PAGE, not a single last-frame copy: with page flipping the
+ * page we draw into now was last painted two frames ago, so "what changed
+ * since last frame" is the wrong question -- "what does THIS page already
+ * show" is the right one, and only a per-page shadow answers it. Index 0 is
+ * also the single-buffer case. blit_shadow_valid gates the first paint of
+ * each page (nothing to compare against yet). */
+static u16  *blit_shadow[2]   = { NULL, NULL };
+static int   blit_shadow_valid[2] = { 0, 0 };
+
 /* VT ownership so fbcon's text cursor stops drawing over us */
 static int   tty_fd           = -1;
 static int   tty_in_graphics  = 0;
@@ -164,6 +181,9 @@ static void sal_VideoCleanup(void)
 		fb_mem = MAP_FAILED;
 	}
 	if (fb_fd >= 0) { close(fb_fd); fb_fd = -1; }
+	free(blit_shadow[0]); blit_shadow[0] = NULL;
+	free(blit_shadow[1]); blit_shadow[1] = NULL;
+	blit_shadow_valid[0] = blit_shadow_valid[1] = 0;
 	for (i = 0; i < input_nfds; i++) {
 		if (input_grab)
 			ioctl(input_fds[i], EVIOCGRAB, 0);
@@ -390,7 +410,11 @@ u32 sal_VideoInit(u32 bpp, u32 color, u32 refreshRate)
 	/* one doubled fb row of cached scratch (fb_width pixels = fb_width/2 words
 	 * for the 2x path; size to fb_width words to also cover a 1:1 fallback). */
 	blit_row = (unsigned int *)malloc((size_t)fb_width * sizeof(unsigned int));
-	if (!mFrameBuf || !blit_row) {
+	/* dirty-row shadows: one per fb page (only [0] used when single-buffered) */
+	blit_shadow[0] = (u16 *)malloc((size_t)SAL_SCREEN_WIDTH * SAL_SCREEN_HEIGHT * sizeof(u16));
+	blit_shadow[1] = (u16 *)malloc((size_t)SAL_SCREEN_WIDTH * SAL_SCREEN_HEIGHT * sizeof(u16));
+	blit_shadow_valid[0] = blit_shadow_valid[1] = 0;
+	if (!mFrameBuf || !blit_row || !blit_shadow[0] || !blit_shadow[1]) {
 		sal_LastErrorSet("out of memory for video buffers");
 		return SAL_ERROR;
 	}
@@ -424,19 +448,45 @@ void sal_VideoFlip(s32 vsync)
 		/* exact 2x: one source pixel -> one 32-bit word (two identical
 		 * RGB565 pixels); each source row -> two adjacent fb rows.
 		 * Building the row in cached memory then memcpy'ing lets libc burst
-		 * it out with LDM/STM instead of single uncached stores. */
+		 * it out with LDM/STM instead of single uncached stores.
+		 *
+		 * Dirty-row skipping (see blit_shadow): the page already shows every
+		 * row that matches the shadow, so unchanged rows cost only a cached
+		 * 640-byte memcmp and no uncached writes; changed rows are narrowed to
+		 * the differing [x0..x1] span. */
+		int page   = fb_pageflip ? fb_back_page : 0;
+		u16 *shadow = blit_shadow[page];
+		int valid  = shadow && blit_shadow_valid[page];
 		for (y = 0; y < SAL_SCREEN_HEIGHT; y++) {
 			const u16 *srow = mFrameBuf + (size_t)y * SAL_SCREEN_WIDTH;
-			unsigned char *d0 = dst_base + (size_t)(y * 2) * fb_line_len;
-			unsigned char *d1 = d0 + fb_line_len;
-			int x;
-			for (x = 0; x < SAL_SCREEN_WIDTH; x++) {
-				unsigned int cc = srow[x];
-				blit_row[x] = cc | (cc << 16);
+			u16 *shrow = shadow ? shadow + (size_t)y * SAL_SCREEN_WIDTH : NULL;
+			int x0 = 0, x1 = SAL_SCREEN_WIDTH - 1, span, k;
+			unsigned char *d0, *d1;
+
+			if (valid) {
+				if (!memcmp(srow, shrow, (size_t)SAL_SCREEN_WIDTH * sizeof(u16)))
+					continue;               /* page already shows this row */
+				/* memcmp said they differ, so these two scans meet */
+				while (srow[x0] == shrow[x0]) x0++;
+				while (srow[x1] == shrow[x1]) x1--;
 			}
-			memcpy(d0, blit_row, (size_t)SAL_SCREEN_WIDTH * sizeof(unsigned int));
-			memcpy(d1, blit_row, (size_t)SAL_SCREEN_WIDTH * sizeof(unsigned int));
+			span = x1 - x0 + 1;
+
+			for (k = 0; k < span; k++) {
+				unsigned int cc = srow[x0 + k];
+				blit_row[k] = cc | (cc << 16);
+			}
+			d0 = dst_base + (size_t)(y * 2) * fb_line_len
+			     + (size_t)x0 * sizeof(unsigned int);
+			d1 = d0 + fb_line_len;
+			memcpy(d0, blit_row, (size_t)span * sizeof(unsigned int));
+			memcpy(d1, blit_row, (size_t)span * sizeof(unsigned int));
+
+			if (shrow)
+				memcpy(shrow + x0, srow + x0, (size_t)span * sizeof(u16));
 		}
+		if (shadow)
+			blit_shadow_valid[page] = 1;
 	} else {
 		/* fallback: 1:1 top-left blit, black borders (unexpected geometry) */
 		int bw = SAL_SCREEN_WIDTH  < fb_width  ? SAL_SCREEN_WIDTH  : fb_width;
