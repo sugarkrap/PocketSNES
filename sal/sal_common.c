@@ -859,23 +859,28 @@ s32 sal_ImageLoad(const char *fname, void *dest, u32 width, u32 height)
 
 	u32 h;
 	unsigned short *dst = dest;
-	if (info_ptr->pixel_depth != 24)
+	/* libpng >= 1.5 made png_info opaque -- png_ptr->pixel_depth/height/
+	 * width are no longer accessible fields, use the public accessors
+	 * instead (same values: pixel_depth is bits-per-pixel, i.e.
+	 * bit_depth * channels; after PNG_TRANSFORM_STRIP_16/STRIP_ALPHA/
+	 * PACKING that's 8 * 3 = 24 for a plain RGB image). */
+	if (png_get_bit_depth(png_ptr, info_ptr) * png_get_channels(png_ptr, info_ptr) != 24)
 	{
 		sal_LastErrorSet("bg image not 24bpp");
 		png_destroy_read_struct(&png_ptr, info_ptr ? &info_ptr : NULL, (png_infopp)NULL);
 		fclose(fp);
 		return SAL_ERROR;
 	}
-	
-	if (height != info_ptr->height)
+
+	if (height != png_get_image_height(png_ptr, info_ptr))
 	{
 		sal_LastErrorSet("image height invalid");
 		png_destroy_read_struct(&png_ptr, info_ptr ? &info_ptr : NULL, (png_infopp)NULL);
 		fclose(fp);
 		return SAL_ERROR;
 	}
-	
-	if (width != info_ptr->width)
+
+	if (width != png_get_image_width(png_ptr, info_ptr))
 	{
 		sal_LastErrorSet("image width is invalid");
 		png_destroy_read_struct(&png_ptr, info_ptr ? &info_ptr : NULL, (png_infopp)NULL);
