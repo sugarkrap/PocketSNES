@@ -125,21 +125,71 @@ static void tr_emit_fallback(ArmEmit *e, unsigned guest_off, void *fn)
 	arm_ldrh_imm(e, TR_Y, TR_REG, offsetof(struct SRegisters, Y));
 }
 
-/* Emit one opcode. Returns 1 if translated natively, 0 if not yet supported. */
-static int tr_emit_op(ArmEmit *e, uint8_t op)
+/* cpu->WaitAddress = NULL  (CPU_SHUTDOWN idle-loop tracking, cleared by ops
+ * that make progress -- INX/DEX/... set it so the interpreter and native paths
+ * agree on shutdown state). */
+static void tr_clear_wait(ArmEmit *e)
 {
+	arm_mov_imm8(e, TR_TMP, 0);
+	arm_str_imm(e, TR_TMP, TR_CPU, offsetof(struct SCPUState, WaitAddress));
+}
+
+/* SETZN over an 8-bit value already in Rb's low byte (SETZN8: _Zero=_Negative=v) */
+static void tr_setzn8(ArmEmit *e, int Rb)
+{
+	arm_strb_imm(e, Rb, TR_ICPU, offsetof(struct SICPU, _Zero));
+	arm_strb_imm(e, Rb, TR_ICPU, offsetof(struct SICPU, _Negative));
+}
+
+/* SETZN over the 16-bit value in Rw (assumed already masked to 16 bits):
+ * _Zero = (W != 0) ? 1 : 0 ; _Negative = high byte. */
+static void tr_setzn16(ArmEmit *e, int Rw)
+{
+	arm_cmp_imm(e, Rw, 0);
+	arm_mov_imm8_cc(e, ARM_EQ, TR_TMP, 0);
+	arm_mov_imm8_cc(e, ARM_NE, TR_TMP, 1);
+	arm_strb_imm(e, TR_TMP, TR_ICPU, offsetof(struct SICPU, _Zero));
+	arm_mov_shift(e, TR_TMP, Rw, ARM_LSR, 8);
+	arm_strb_imm(e, TR_TMP, TR_ICPU, offsetof(struct SICPU, _Negative));
+}
+
+/* INX/INY/DEX/DEY on pinned index register `rreg`. x8 selects width, matching
+ * the interpreter's OpE8X1/X0 etc.: 8-bit touches only the low byte (SETZN8),
+ * 16-bit the whole register (SETZN16), both clear WaitAddress and add a cycle. */
+static void tr_index_incdec(ArmEmit *e, int rreg, int is_dec, int x8)
+{
+	tr_clear_wait(e);
+	if (x8) {
+		/* low byte only; high byte preserved */
+		if (is_dec) arm_sub_imm8(e, TR_TMP, rreg, 1);
+		else        arm_add_imm8(e, TR_TMP, rreg, 1);
+		arm_and_imm(e, TR_TMP, TR_TMP, 0xFF, 0);   /* new low byte */
+		arm_and_imm(e, rreg, rreg, 0xFF, 12);      /* keep 0xFF00 (high byte) */
+		arm_orr_reg(e, rreg, rreg, TR_TMP);
+		tr_setzn8(e, TR_TMP);
+	} else {
+		if (is_dec) arm_sub_imm8(e, rreg, rreg, 1);
+		else        arm_add_imm8(e, rreg, rreg, 1);
+		arm_mov_shift(e, rreg, rreg, ARM_LSL, 16);  /* truncate to 16 bits */
+		arm_mov_shift(e, rreg, rreg, ARM_LSR, 16);
+		tr_setzn16(e, rreg);
+	}
+	tr_add_cycles(e, ONE_CYCLE);
+}
+
+/* Emit one opcode. Returns 1 if translated natively, 0 if not yet supported.
+ * m8/x8 = current accumulator/index width (blocks are mode-specific). */
+static int tr_emit_op(ArmEmit *e, uint8_t op, int m8, int x8)
+{
+	(void)m8;
 	switch (op) {
-	case 0x18:  /* CLC */
-		tr_set_carry(e, 0);
-		tr_add_cycles(e, ONE_CYCLE);
-		return 1;
-	case 0x38:  /* SEC */
-		tr_set_carry(e, 1);
-		tr_add_cycles(e, ONE_CYCLE);
-		return 1;
-	case 0xEA:  /* NOP */
-		tr_add_cycles(e, ONE_CYCLE);
-		return 1;
+	case 0x18:  /* CLC */ tr_set_carry(e, 0); tr_add_cycles(e, ONE_CYCLE); return 1;
+	case 0x38:  /* SEC */ tr_set_carry(e, 1); tr_add_cycles(e, ONE_CYCLE); return 1;
+	case 0xEA:  /* NOP */ tr_add_cycles(e, ONE_CYCLE); return 1;
+	case 0xE8:  /* INX */ tr_index_incdec(e, TR_X, 0, x8); return 1;
+	case 0xC8:  /* INY */ tr_index_incdec(e, TR_Y, 0, x8); return 1;
+	case 0xCA:  /* DEX */ tr_index_incdec(e, TR_X, 1, x8); return 1;
+	case 0x88:  /* DEY */ tr_index_incdec(e, TR_Y, 1, x8); return 1;
 	default:
 		return 0;
 	}
@@ -170,7 +220,7 @@ extern "C" void *dyn_translate_ops(const uint8_t *ops, int n, ArmEmit *e,
 	tr_prologue(e);
 	for (i = 0; i < n; i++) {
 		uint8_t op = ops[i];
-		if (!tr_emit_op(e, op)) {
+		if (!tr_emit_op(e, op, m8, x8)) {
 			void *fn = op_fn_table ? op_fn_table[op] : 0;
 			if (!fn)
 				return 0;   /* no native translation and no fallback */
@@ -194,6 +244,76 @@ static void tr_stub_add_a(struct SRegisters *reg, struct SICPU *icpu, struct SCP
 	(void)icpu;
 	reg->A.W += 0x34;
 	cpu->Cycles += ONE_CYCLE;
+}
+
+/* Translate a single index op for mode x8, run it with X=xin, and read back
+ * the resulting X.W plus the _Zero/_Negative flag bytes. Returns 0 on failure. */
+static int tr_run_index(uint8_t op, int x8, uint16_t xin,
+                        uint16_t *xout, uint8_t *zout, uint8_t *nout)
+{
+	unsigned char code[64];
+	ArmEmit e;
+	tr_block blk;
+	struct SRegisters reg;
+	struct SICPU icpu;
+	struct SCPUState cpu;
+	uint8_t ops[1] = { op };
+	void *rwx = mmap(NULL, 4096, PROT_READ | PROT_WRITE | PROT_EXEC,
+	                 MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	if (rwx == MAP_FAILED) return 0;
+	arm_emit_init(&e, rwx, 1024);
+	blk = (tr_block)dyn_translate_ops(ops, 1, &e, /*m8*/1, x8, 0);
+	if (!blk) { munmap(rwx, 4096); return 0; }
+	__builtin___clear_cache((char *)rwx, (char *)e.cur);
+
+	memset(&reg, 0, sizeof(reg));
+	memset(&icpu, 0, sizeof(icpu));
+	memset(&cpu, 0, sizeof(cpu));
+	reg.X.W = xin; reg.Y.W = xin;   /* Y=X so INY/DEY hit the same cases */
+	cpu.PC = code;
+	blk(&reg, &icpu, &cpu);
+
+	/* INX/DEX act on X, INY/DEY on Y -- read whichever the op targets */
+	*xout = (op == 0xC8 || op == 0x88) ? reg.Y.W : reg.X.W;
+	*zout = icpu._Zero;
+	*nout = icpu._Negative;
+	munmap(rwx, 4096);
+	return 1;
+}
+
+/* Offline INX/INY/DEX/DEY check against hand-derived expected values (covers
+ * 16-bit wrap + Z/N, and 8-bit low-byte-only + high-byte preservation). */
+static int dyn_index_selftest(void)
+{
+	int ok = 1;
+	uint16_t xo; uint8_t zo, no;
+	struct { uint8_t op; int x8; uint16_t xin, xexp; uint8_t zexp, nexp; } c[] = {
+		/* 16-bit */
+		{ 0xE8, 0, 0x1234, 0x1235, 1, 0x12 },  /* INX: nonzero, N=high byte */
+		{ 0xE8, 0, 0xFFFF, 0x0000, 0, 0x00 },  /* INX wrap to 0: Z set */
+		{ 0xE8, 0, 0x00FF, 0x0100, 1, 0x01 },
+		{ 0xCA, 0, 0x0001, 0x0000, 0, 0x00 },  /* DEX to 0: Z set */
+		{ 0xCA, 0, 0x0000, 0xFFFF, 1, 0xFF },  /* DEX wrap: N set (0xFF) */
+		{ 0xC8, 0, 0x8000, 0x8001, 1, 0x80 },  /* INY: N from high byte */
+		{ 0x88, 0, 0x0100, 0x00FF, 1, 0x00 },  /* DEY */
+		/* 8-bit: only low byte changes, high preserved; SETZN8 on low byte */
+		{ 0xE8, 1, 0x12FF, 0x1200, 0x00, 0x00 },  /* XL wraps 0xFF->0x00, Z set */
+		{ 0xE8, 1, 0x127F, 0x1280, 0x80, 0x80 },  /* XL=0x80, N set */
+		{ 0xCA, 1, 0x1200, 0x12FF, 0xFF, 0xFF },  /* XL 0x00->0xFF */
+	};
+	unsigned i;
+	for (i = 0; i < sizeof(c) / sizeof(c[0]); i++) {
+		if (!tr_run_index(c[i].op, c[i].x8, c[i].xin, &xo, &zo, &no)) {
+			fprintf(stderr, "PIKO-DYN idx: translate/run failed op=%02X\n", c[i].op); ok = 0; continue;
+		}
+		if (xo != c[i].xexp || zo != c[i].zexp || no != c[i].nexp) {
+			fprintf(stderr, "PIKO-DYN idx FAIL op=%02X x8=%d in=%04X: got X=%04X Z=%02X N=%02X want X=%04X Z=%02X N=%02X\n",
+			        c[i].op, c[i].x8, c[i].xin, xo, zo, no, c[i].xexp, c[i].zexp, c[i].nexp);
+			ok = 0;
+		}
+	}
+	fprintf(stderr, "PIKO-DYN index test: %s\n", ok ? "PASS" : "FAIL");
+	return ok;
 }
 
 extern "C" int dyn_translate_selftest(void)
@@ -251,5 +371,8 @@ extern "C" int dyn_translate_selftest(void)
 	        "A=%04X _Carry=%d cycles=%ld)\n", ok ? "PASS" : "FAIL",
 	        reg.A.W, (int)icpu._Carry, (long)cpu.Cycles);
 	munmap(buf, BUFSZ);
+
+	if (!dyn_index_selftest())
+		ok = 0;
 	return ok;
 }

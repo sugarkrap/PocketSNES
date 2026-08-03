@@ -194,9 +194,16 @@ default until it's proven; the shipped binary stays the known-good interpreter.
     char`) and adjacent, and a word `STR` to `_Carry` was clobbering
     `_Zero/_Negative/_Overflow`. Fixed with `STRB`; **0 divergences** after, on
     the same code path that failed immediately before.
+  - [x] Index inc/dec **INX/INY/DEX/DEY**, both widths (8-bit low-byte-only +
+    16-bit with wrap), exact `SETZN8/16` (incl. the 16-bit `_Zero`=0/1 via
+    conditional `MOV`, `_Negative`=high byte) and `WaitAddress`/cycle handling.
+    The validator is now **mode-aware** (a stub per opcode per M/X mode, picked
+    from the runtime P). Verified offline (10 hand-derived cases) **and** live
+    (0 divergences). New encoders: `AND/SUB #imm`, `ORR/CMP`, cond `MOV`,
+    shifted `MOV`.
   - [ ] Translate the rest of the hot set (`LDA/STA/STZ`, branches, `CMP/CPY`,
-    `INX/INY/DEX/DEC`, `ASL`, `XBA`, `JSR/RTS`, `PHA/PLA`), one opcode at a time,
-    each gated by the validator above.
+    `INC/DEC A`, `ASL A`, `XBA`, `JSR/RTS`, `PHA/PLA`) — memory + control-flow
+    ops are the larger remaining effort — each gated by the validator.
   - [ ] Block-driven execution (the recompiler actually drives the CPU) — the
     speed win, once enough opcodes are native; gated + validator-green first.
   - [ ] Idle-loop detection for the boot spin (`$FA:00F9` CLC/LDA/BPL).

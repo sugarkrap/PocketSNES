@@ -112,6 +112,50 @@ static inline void arm_blx(ArmEmit *e, int Rm)
 	arm_emit(e, 0xE12FFF30u | ((uint32_t)Rm & 0xF));
 }
 
+/* AND Rd, Rn, #imm8 ROR (2*rot)  -- base 0xE2000000. */
+static inline void arm_and_imm(ArmEmit *e, int Rd, int Rn, uint32_t imm8, uint32_t rot)
+{
+	arm_emit(e, 0xE2000000u | ((uint32_t)Rn << 16) | ((uint32_t)Rd << 12)
+	            | ((rot & 0xF) << 8) | (imm8 & 0xFF));
+}
+
+/* SUB Rd, Rn, #imm8  -- base 0xE2400000. */
+static inline void arm_sub_imm8(ArmEmit *e, int Rd, int Rn, uint32_t imm8)
+{
+	arm_emit(e, 0xE2400000u | ((uint32_t)Rn << 16) | ((uint32_t)Rd << 12) | (imm8 & 0xFF));
+}
+
+/* ORR Rd, Rn, Rm  (register)  -- base 0xE1800000. */
+static inline void arm_orr_reg(ArmEmit *e, int Rd, int Rn, int Rm)
+{
+	arm_emit(e, 0xE1800000u | ((uint32_t)Rn << 16) | ((uint32_t)Rd << 12) | ((uint32_t)Rm & 0xF));
+}
+
+/* CMP Rn, #imm8  (sets flags)  -- base 0xE3500000. */
+static inline void arm_cmp_imm(ArmEmit *e, int Rn, uint32_t imm8)
+{
+	arm_emit(e, 0xE3500000u | ((uint32_t)Rn << 16) | (imm8 & 0xFF));
+}
+
+/* ARM condition codes (for conditional forms) */
+#define ARM_EQ 0x0
+#define ARM_NE 0x1
+
+/* MOV<cc> Rd, #imm8  -- conditional immediate move (base minus cond = 0x03A00000). */
+static inline void arm_mov_imm8_cc(ArmEmit *e, int cc, int Rd, uint32_t imm8)
+{
+	arm_emit(e, ((uint32_t)(cc & 0xF) << 28) | 0x03A00000u | ((uint32_t)Rd << 12) | (imm8 & 0xFF));
+}
+
+/* MOV Rd, Rm, <shift> #amount  -- base 0xE1A00000. type: 0=LSL, 1=LSR. */
+#define ARM_LSL 0
+#define ARM_LSR 1
+static inline void arm_mov_shift(ArmEmit *e, int Rd, int Rm, int type, int amount)
+{
+	arm_emit(e, 0xE1A00000u | ((uint32_t)Rd << 12)
+	            | (((uint32_t)amount & 0x1F) << 7) | (((uint32_t)type & 3) << 5) | ((uint32_t)Rm & 0xF));
+}
+
 /* ---- load / store (immediate offset) --------------------------------- *
  * These are the primitives the recompiler will use to spill/reload the
  * 65816 register file (SRegisters) at block boundaries.
