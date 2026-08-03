@@ -24,6 +24,10 @@ extern "C" {
  */
 int S9xDynSelfTest(void);
 
+/* Step 3 translator self-test (dynarec_translate.cpp): translate CLC;SEC;CLC
+ * and run the block, checking flags/cycles/regs. Returns 1 on pass. */
+int dyn_translate_selftest(void);
+
 #ifdef __cplusplus
 }
 #endif

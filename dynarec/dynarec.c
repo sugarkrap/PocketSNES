@@ -253,5 +253,9 @@ int S9xDynSelfTest(void)
 	if (!dyn_abi_test())
 		ok = 0;
 
+	/* Step 3: translate CLC/SEC/NOP and run the block */
+	if (!dyn_translate_selftest())
+		ok = 0;
+
 	return ok;
 }

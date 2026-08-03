@@ -93,11 +93,21 @@ interpreter's per-instruction dispatch for near-native execution on hot paths.
   control-flow or mode-changing op (branch, `JMP/JSR/RTS/RTI`, `REP/SEP/XCE`,
   interrupt), or a length cap.
 
-- **Register ABI** — the hot 65816 registers (`A`, `X`, `Y`, and the `P`
-  flags) live in fixed ARM registers for the duration of a block; the block
-  **prologue** loads them from `SRegisters`, the **epilogue** spills them back.
-  `SRegisters` = `PC, PB, DB, P, A, D, S, X, Y` (`pair` = 16-bit with byte
-  access). Everything else stays memory-backed and is touched via `LDR/STR`.
+- **Register ABI** — a translated block mirrors an interpreter opcode fn's
+  signature: `void blk(SRegisters *reg, SICPU *icpu, SCPUState *cpu)`
+  (`r0/r1/r2`), so interpreter fallbacks are a straight pass-through. Pinned for
+  the block's duration: `r8/r9/r10` = reg/icpu/cpu base pointers, `r4/r5/r6` =
+  `A/X/Y` (loaded by the prologue from `SRegisters`, spilled by the epilogue).
+  `SRegisters` = `PC, PB, DB, P, A, D, S, X, Y` (`pair` = 16-bit).
+
+- **Flags are NOT in `P` during execution** (crucial). snes9x keeps the live
+  N/Z/C/V in four separate `SICPU` fields — `_Carry`, `_Zero`, `_Negative`,
+  `_Overflow` — with their own encodings (`CLC ⇒ icpu->_Carry = 0`;
+  `_Zero == 0` *means* Z set; `_Negative` holds a byte whose bit 7 is N). `P` is
+  only packed/unpacked at interrupt/loop boundaries. Native ops therefore write
+  those `SICPU` fields (in memory) to stay consistent with interpreter
+  fallbacks. A later optimisation can map the four to ARM's own NZCV condition
+  flags; correctness first means mirroring the interpreter exactly for now.
 
 - **Emitter** (`dynarec_arm.h`) — writes ARMv5TE words into an RWX buffer;
   `__builtin___clear_cache` flushes them (ARM I-cache/D-cache are **not**
@@ -164,10 +174,18 @@ default until it's proven; the shipped binary stays the known-good interpreter.
   regfile)` (r0), prologue `push {r4-r8,lr}` + `LDRH` loads, epilogue `STRH`
   spills + `pop {r4-r8,pc}`. Added `LDRH/STRH/ADD#imm/MOV reg` encoders.
   **Done — round-trip PASSes on real hardware.**
-- [ ] **Step 3 — Translate the trivial opcodes**, each gated by the harness:
-  register transfers (`TAX/TAY/TXA…`), immediate loads (`LDA/LDX/LDY #`), flag
-  ops (`SEC/CLC/SEI`; `REP/SEP` as block-enders). Everything else still calls
-  the interpreter.
+- **Step 3 — Translate opcodes** (in progress).
+  - [x] Translator skeleton (`dynarec_translate.cpp`) with the interpreter-
+    matching block ABI + prologue/epilogue; native emission for **CLC/SEC/NOP**
+    (CLC is a top-3 hottest opcode). Offline self-test translates `CLC;SEC;CLC`
+    and runs it — **PASS on hardware** (`_Carry`, cycles, A/X/Y all correct).
+  - [ ] Hybrid interpreter-fallback emission (spill pinned regs → struct, set
+    guest PC, call the opcode fn, reload) so blocks with un-translated opcodes
+    still run — the prerequisite for live wiring.
+  - [ ] Run-both-and-diff gate, then translate the rest of the hot set
+    (`LDA/STA/STZ`, branches, `CMP/CPY`, `INX/INY/DEX/DEC`, `ASL`, `XBA`,
+    `JSR/RTS`, `PHA/PLA`), one opcode at a time.
+  - [ ] Idle-loop detection for the boot spin (`$FA:00F9` CLC/LDA/BPL).
 - [ ] **Step 4 — Memory fast paths** (inline RAM/ROM; MMIO → C handlers) and
   ALU/addressing modes.
 - [ ] **Step 5 — Block linking / branch chaining**, cycle-accurate event
@@ -257,4 +275,5 @@ hardware. Two regimes:
 | `dynarec.h`  | Public interface. |
 | `dynarec_block.{h,c}` | 65816 decoder, block discovery, block cache. |
 | `dynarec_harness.{h,c}` | CPU-state snapshot/diff + WRAM hash (correctness net). |
+| `dynarec_translate.cpp` | 65816 → ARM block translator (`.cpp` for `offsetof` on snes9x structs). |
 | `README.md`  | This document. |
