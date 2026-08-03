@@ -57,6 +57,9 @@
 #ifdef PIKO_DYNAREC_VERIFY
 #include "dynarec_verify.h"
 #endif
+#ifdef PIKO_DYNAREC_EXEC
+#include "dynarec_exec.h"
+#endif
 #ifdef THREADCPU
 void S9xMainLoop (struct SRegisters * reg, struct SICPU * icpu, struct SCPUState * cpu)
 {
@@ -144,6 +147,14 @@ void S9xMainLoop (void)
 			}
 #endif
 		} //if (CPU.Flags)
+#ifdef PIKO_DYNAREC_EXEC
+		/* block-driven execution: if a translated block runs, it advances the
+		 * CPU through a whole straight-line run and updates cpu->PC; skip the
+		 * single-instruction dispatch. Event servicing (SA1/HBLANK below, and
+		 * the CPU.Flags/APU work above) then happens at block granularity. */
+		if (dyn_exec_on && dyn_exec_step (&Registers, &ICPU, &CPU))
+			goto piko_after_dispatch;
+#endif
 #ifdef CPU_SHUTDOWN
 		CPU.PCAtOpcodeStart = CPU.PC;
 #endif
@@ -178,6 +189,9 @@ void S9xMainLoop (void)
 #ifdef PIKO_DYNAREC_VERIFY
 		if (_vdo)
 			dyn_verify_after(_vop, &Registers, &ICPU, &CPU);
+#endif
+#ifdef PIKO_DYNAREC_EXEC
+	piko_after_dispatch:
 #endif
 
 		if (SA1.Executing)

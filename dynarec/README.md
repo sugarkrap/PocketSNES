@@ -204,8 +204,17 @@ default until it's proven; the shipped binary stays the known-good interpreter.
   - [ ] Translate the rest of the hot set (`LDA/STA/STZ`, branches, `CMP/CPY`,
     `INC/DEC A`, `ASL A`, `XBA`, `JSR/RTS`, `PHA/PLA`) — memory + control-flow
     ops are the larger remaining effort — each gated by the validator.
-  - [ ] Block-driven execution (the recompiler actually drives the CPU) — the
-    speed win, once enough opcodes are native; gated + validator-green first.
+  - [~] Block-driven execution (`make EXEC=1`, `PIKO_DYN_EXEC=1`,
+    `dynarec_exec.cpp`): the recompiler drives the CPU. Plumbing **written and
+    builds** (default byte-identical); **not yet validated end-to-end** — needs
+    a run (QEMU or device). A translated block runs a straight-line guest run to
+    its ender and updates `cpu->PC`; the main loop skips the single-instruction
+    dispatch when a block ran (event servicing SA1/HBLANK/IRQ now at block
+    granularity). Cycle parity via a per-instruction `cpu->Cycles += MemSpeed`
+    add inside the block. ROM-only for now (`PB != $7E/$7F`) — RAM code can
+    self-modify and needs cache invalidation we don't have yet. NO speed win
+    expected until native opcode coverage grows (blocks are still mostly
+    fallbacks). 1 MiB code arena, flushed wholesale when full.
   - [ ] Idle-loop detection for the boot spin (`$FA:00F9` CLC/LDA/BPL).
 - [ ] **Step 4 — Memory fast paths** (inline RAM/ROM; MMIO → C handlers) and
   ALU/addressing modes.
@@ -298,4 +307,5 @@ hardware. Two regimes:
 | `dynarec_harness.{h,c}` | CPU-state snapshot/diff + WRAM hash (correctness net). |
 | `dynarec_translate.cpp` | 65816 → ARM block translator (`.cpp` for `offsetof` on snes9x structs). |
 | `dynarec_verify.cpp` | Live run-both-and-diff validator (`make VERIFY=1`). |
+| `dynarec_exec.{h,cpp}` | Block-driven execution: blocks drive the CPU (`make EXEC=1`). |
 | `README.md`  | This document. |

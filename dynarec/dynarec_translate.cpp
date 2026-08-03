@@ -46,6 +46,7 @@ extern "C" {
 #define TR_ICPU   ARM_R9
 #define TR_CPU    ARM_R10
 #define TR_TMP    ARM_R3    /* caller-saved scratch */
+#define TR_TMP2   ARM_R12   /* caller-saved scratch (ip) */
 
 /* pushed/popped callee-saved set (+lr / +pc). Eight registers -> the pushed
  * frame is 8-byte aligned, satisfying AAPCS at the interpreter-fallback call. */
@@ -211,6 +212,53 @@ static int tr_emit_op(ArmEmit *e, uint8_t op, int m8, int x8)
  * takes an explicit op list rather than walking guest memory so it stays
  * unit-testable in isolation.
  */
+/* Per-instruction fetch cost: cpu->Cycles += cpu->MemSpeed, exactly as the
+ * interpreter main loop does before each opcode. Emitted before every
+ * instruction in a live block so cycle counts match the interpreter. */
+static void tr_add_memspeed(ArmEmit *e)
+{
+	arm_ldr_imm(e, TR_TMP,  TR_CPU, offsetof(struct SCPUState, MemSpeed));
+	arm_ldr_imm(e, TR_TMP2, TR_CPU, offsetof(struct SCPUState, Cycles));
+	arm_add_reg(e, TR_TMP2, TR_TMP2, TR_TMP);
+	arm_str_imm(e, TR_TMP2, TR_CPU, offsetof(struct SCPUState, Cycles));
+}
+
+/*
+ * Translate a real straight-line guest block: walk `code` (a host pointer at
+ * the block's first opcode, i.e. cpu->PC) under mode (m8,x8), emitting each
+ * instruction until the first block-ender. Every instruction gets the
+ * per-fetch MemSpeed cycle add, then either native code or an interpreter
+ * fallback (op_fn_table[op], required -- the block-ender is always a fallback
+ * since control-flow ops aren't translated yet, and it updates cpu->PC).
+ * Returns the block entry pointer, or NULL if an opcode has no fallback, the
+ * block runs past the safety cap without an ender, or the buffer overflows.
+ */
+extern "C" void *dyn_translate_run(const uint8_t *code, int m8, int x8,
+                                   void *const op_fn_table[256], ArmEmit *e)
+{
+	void *entry = (void *)e->cur;
+	unsigned off = 0;
+	tr_prologue(e);
+	for (;;) {
+		uint8_t op = code[off];
+		int ender = dyn_op_is_block_end(op);
+		tr_add_memspeed(e);
+		if (!tr_emit_op(e, op, m8, x8)) {
+			void *fn = op_fn_table[op];
+			if (!fn)
+				return 0;              /* no native + no fallback */
+			tr_emit_fallback(e, off, fn);
+		}
+		off += (unsigned)dyn_op_length(op, m8, x8);
+		if (ender)
+			break;
+		if (off >= DYN_BLOCK_MAX_BYTES)
+			return 0;                  /* no ender in range: let the interpreter run it */
+	}
+	tr_epilogue(e);
+	return e->overflow ? 0 : entry;
+}
+
 extern "C" void *dyn_translate_ops(const uint8_t *ops, int n, ArmEmit *e,
                                    int m8, int x8, void *const op_fn_table[256])
 {

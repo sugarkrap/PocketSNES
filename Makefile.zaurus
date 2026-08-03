@@ -103,6 +103,14 @@ CFLAGS   += -DPIKO_DYNAREC_VERIFY
 CXXFLAGS += -DPIKO_DYNAREC_VERIFY
 endif
 
+# `make EXEC=1` builds block-driven execution (gated at runtime by PIKO_DYN_EXEC):
+# translated blocks actually drive the CPU. EXPERIMENTAL -- runs generated code
+# as the live CPU. Default builds omit it (interpreter only).
+ifdef EXEC
+CFLAGS   += -DPIKO_DYNAREC_EXEC
+CXXFLAGS += -DPIKO_DYNAREC_EXEC
+endif
+
 LDFLAGS = $(CXXFLAGS) \
 		-L$(DEPS_STAGE)/usr/lib -Wl,-rpath-link=$(DEPS_STAGE)/usr/lib \
 		-Wl,-rpath-link=$(SDL_STAGE)/usr/lib \

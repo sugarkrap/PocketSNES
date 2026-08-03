@@ -20,6 +20,9 @@
 #ifdef PIKO_DYNAREC_VERIFY
 #include "dynarec_verify.h"
 #endif
+#ifdef PIKO_DYNAREC_EXEC
+#include "dynarec_exec.h"
+#endif
 
 #define SNES_SCREEN_WIDTH  256
 #define SNES_SCREEN_HEIGHT 192
@@ -675,6 +678,13 @@ int mainEntry(int argc, char* argv[])
 	if (getenv("PIKO_DYN_VERIFY")) {
 		dyn_verify_init();
 		dyn_verify_on = 1;
+	}
+#endif
+#ifdef PIKO_DYNAREC_EXEC
+	/* EXEC build: PIKO_DYN_EXEC=1 lets translated blocks drive the CPU. */
+	if (getenv("PIKO_DYN_EXEC")) {
+		dyn_exec_init();
+		dyn_exec_on = 1;
 	}
 #endif
 
