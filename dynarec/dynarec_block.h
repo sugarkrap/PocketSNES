@@ -32,6 +32,12 @@ int dyn_op_length(uint8_t op, int m8, int x8);
  * the block's validity -- plus STP/WAI (halt) and MVP/MVN (self-repeating). */
 int dyn_op_is_block_end(uint8_t op);
 
+/* True if the 24-bit guest address `pc` lands in WRAM, INCLUDING its mirrors.
+ * A translated block is a snapshot of the bytes it was built from, so code in
+ * writable memory must never be cached: the game can rewrite it underneath us
+ * and the cache would happily keep running the stale version forever. */
+int dyn_pc_in_wram(uint32_t pc);
+
 /* A discovered block: a straight-line instruction run valid for one (M,X) mode. */
 typedef struct {
 	uint32_t start_pc;   /* 24-bit guest address of the first instruction */

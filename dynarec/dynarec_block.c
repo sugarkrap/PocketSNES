@@ -72,6 +72,33 @@ int dyn_op_length(uint8_t op, int m8, int x8)
 	return ModeSize[mode];
 }
 
+/*
+ * WRAM, including its mirrors.
+ *
+ * The exec path used to ask `PB == 0x7E || PB == 0x7F`, which is only the two
+ * banks where WRAM lives at full size. But the first 8K of WRAM is ALSO
+ * mirrored into $0000-$1FFF of every bank in $00-$3F and $80-$BF, and that
+ * mirror is where games actually put the RAM routines they rewrite: FF6's NMI
+ * vector is a JML trampoline at $001500, bank $00, which the game reinstalls
+ * every single frame. The old test let exactly that address through into the
+ * block cache, where a snapshot of it would then be executed forever.
+ *
+ * The same off-by-a-mirror bug bit the static recompiler in arm-snesrec twice
+ * -- once here and once in its address mapper -- so it is written down rather
+ * than open-coded a third time.
+ */
+int dyn_pc_in_wram(uint32_t pc)
+{
+	uint8_t  bank = (uint8_t)((pc >> 16) & 0xFF);
+	uint16_t off  = (uint16_t)(pc & 0xFFFF);
+
+	if (bank == 0x7E || bank == 0x7F)
+		return 1;
+	if (off < 0x2000 && (bank < 0x40 || (bank >= 0x80 && bank < 0xC0)))
+		return 1;
+	return 0;
+}
+
 int dyn_op_is_block_end(uint8_t op)
 {
 	switch (op) {
