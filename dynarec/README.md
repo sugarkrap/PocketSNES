@@ -211,8 +211,8 @@ default until it's proven; the shipped binary stays the known-good interpreter.
     its ender and updates `cpu->PC`; the main loop skips the single-instruction
     dispatch when a block ran (event servicing SA1/HBLANK/IRQ now at block
     granularity). Cycle parity via a per-instruction `cpu->Cycles += MemSpeed`
-    add inside the block. ROM-only for now (`PB != $7E/$7F`) — RAM code can
-    self-modify and needs cache invalidation we don't have yet. NO speed win
+    add inside the block. ROM-only for now (`!dyn_pc_in_wram(pc)`) — RAM code
+    can self-modify and needs cache invalidation we don't have yet. NO speed win
     expected until native opcode coverage grows (blocks are still mostly
     fallbacks). 1 MiB code arena, flushed wholesale when full.
   - [ ] Idle-loop detection for the boot spin (`$FA:00F9` CLC/LDA/BPL).
@@ -295,6 +295,13 @@ hardware. Two regimes:
 - **Code in RAM.** Hot blocks appear in bank `$7E` (WRAM) — FF6 executes code
   it copies into RAM. Confirms the **translation cache must invalidate on
   writes** to code pages (see architecture). Not an afterthought.
+
+  Note that "RAM" is not just `$7E/$7F`: the first 8K of WRAM is mirrored into
+  `$0000-$1FFF` of every bank in `$00-$3F` and `$80-$BF`, and that mirror is
+  where the interesting cases live. FF6's NMI vector is a JML trampoline at
+  `$001500` — bank `$00` — which the game reinstalls every frame. Use
+  `dyn_pc_in_wram()`; a bank-only test silently lets those blocks into the
+  cache.
 
 ## 8. Files
 
