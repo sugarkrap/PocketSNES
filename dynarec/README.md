@@ -264,9 +264,20 @@ default until it's proven; the shipped binary stays the known-good interpreter.
         access, because the CPU_SHUTDOWN path reads it and the interpreter
         sets it per opcode in cpuexec.cpp. Both VAR_CYCLES and CPU_SHUTDOWN
         are on in this build (pocketsnes/linux/port.h).
-      - still to check before writing the 16-bit path: what S9xGetWord
-        charges for a word access, since it does its own single Map lookup
-        rather than two byte accesses.
+      - **the 16-bit path is NOT two byte accesses.** S9xGetWord does ONE Map
+        lookup and charges `MemorySpeed[block] << 1`, does ONE BlockIsRAM
+        check, and then loads two bytes off the same base pointer
+        (FAST_LSB_WORD_ACCESS is `#undef`d in linux/port.h, so it is two LDRBs
+        rather than an unaligned LDRH -- which is what we want on ARMv5
+        anyway). Emitting two byte fast paths instead would charge
+        `MemorySpeed[b1] + MemorySpeed[b2]`, do two lookups, and write
+        WaitAddress twice: identical only when both bytes land in the same
+        block, and wrong in cycles regardless. Emit one probe, one doubled
+        cycle charge, one BlockIsRAM check, two LDRBs.
+      - S9xGetWord special-cases `Address == 0x00001fff` and falls back to two
+        S9xGetByte calls, because the word straddles a Map block edge at the
+        top of the WRAM mirror. The fast path must bail to the interpreter for
+        that address rather than assume one block covers both bytes.
       - add each new opcode to dyn_verify_translatable() as it lands, so the
         run-both-and-diff net actually covers it. VERIFY on hardware is cheap
         (53,908 checks in 60s) and is what proved the existing opcode set
