@@ -948,3 +948,49 @@ MemSpeed accounting (~7 memory operations each, section 10), and the fallback
 calling convention. Those are costs *inside* the generated code rather than
 around it -- which is where this should have wanted to go all along, and now
 can, because the surrounding overhead is no longer large enough to hide it.
+
+## 16. Cycles in a register: correct, verified, and a wash
+
+The largest per-instruction cost inside a block was cycle accounting.
+tr_add_memspeed was load/add/store on cpu->Cycles for EVERY instruction, and
+tr_add_cycles another load/add/store for every native op. cpu->Cycles now
+lives in r11 for the block's duration, flushed before each interpreter
+fallback (which reads and writes it) and at the epilogue.
+
+Correct: the offline self-test still reports `cycles=18` for its
+CLC/fallback/SEC round trip, and VERIFY passes 15,787 checks with 0
+divergences -- and VERIFY diffs cycles explicitly, so this is exactly the
+change it is good at catching.
+
+**48.00 frames/s against 47.78. A wash.** The arithmetic says why:
+
+  - saved: ~2 memory operations per instruction (~3 instructions a block) = ~6
+  - paid: r11 and r12 join the save set, so the prologue/epilogue push and pop
+    two more registers = 4 per block
+  - paid: each fallback flushes and reloads TR_CYC = 2 more, ~1.5 times a block
+
+Net roughly +2 operations per block out of dozens. With about 1.5 interpreter
+fallbacks per three executed instructions there is never a run of native code
+long enough for a cached register to amortise anything -- the same structural
+wall that made per-block register pinning and native branches measure flat.
+
+Kept rather than reverted: it is strictly less work per instruction, VERIFY
+covers it, and it converts from neutral to a win the moment fallback density
+drops. It is a prerequisite, not a result.
+
+**One easy win left in it.** A block always ends with a fallback (the
+block-ender is always an interpreter call), which leaves cpu->Cycles correct
+in memory -- and then the emitted code reloads TR_CYC and the epilogue stores
+it straight back. Both are dead. Skipping the reload on the final fallback and
+the store that follows removes two memory operations per block, ~5.7M blocks a
+run.
+
+### The real conclusion
+
+Three optimisations inside the generated code and three around it now point
+the same way: **fallback density is the binding constraint.** At ~50% of
+executed instructions calling into the interpreter, every block-local
+optimisation is amortised over one or two instructions and disappears. The
+only things that change that are native coverage of the hot opcodes -- CMP abs
+at 11.6% is the obvious next one, then LDA dp at 4.1% and the STA family --
+and block linking so a block does not end at every control transfer.

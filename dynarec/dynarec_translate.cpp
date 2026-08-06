@@ -45,13 +45,20 @@ extern "C" {
 #define TR_REG    ARM_R8
 #define TR_ICPU   ARM_R9
 #define TR_CPU    ARM_R10
+#define TR_CYC    ARM_R11   /* cpu->Cycles, live across the whole block */
 #define TR_TMP    ARM_R3    /* caller-saved scratch */
 #define TR_TMP2   ARM_R12   /* caller-saved scratch (ip) */
 
-/* pushed/popped callee-saved set (+lr / +pc). Eight registers -> the pushed
- * frame is 8-byte aligned, satisfying AAPCS at the interpreter-fallback call. */
+/*
+ * Pushed/popped callee-saved set (+lr / +pc). r11 joins it for TR_CYC, and
+ * r12 comes along ONLY to keep the count even: nine registers plus lr is 36
+ * bytes, which would leave sp 4-byte aligned at the interpreter-fallback call
+ * and violate AAPCS. r12 is caller-saved, so pushing it is harmless -- it buys
+ * alignment for four bytes of stack.
+ */
 #define TR_SAVES ((1u<<ARM_R4)|(1u<<ARM_R5)|(1u<<ARM_R6)|(1u<<ARM_R7)| \
-                  (1u<<ARM_R8)|(1u<<ARM_R9)|(1u<<ARM_R10))
+                  (1u<<ARM_R8)|(1u<<ARM_R9)|(1u<<ARM_R10)|(1u<<ARM_R11)| \
+                  (1u<<ARM_R12))
 
 /*
  * Which of the pinned A/X/Y a block actually uses natively.
@@ -109,6 +116,17 @@ static void tr_prologue(ArmEmit *e, unsigned mask)
 	/* base host pointer for computing cpu->PC at fallback sites: the block is
 	 * entered with cpu->PC pointing at its first opcode byte. */
 	arm_ldr_imm(e, TR_PCBASE, TR_CPU, offsetof(struct SCPUState, PC));
+	/*
+	 * cpu->Cycles lives in a register for the block's duration. It was three
+	 * memory operations per instruction (load, add, store) in tr_add_memspeed
+	 * alone, plus three more in tr_add_cycles for every native op -- on a
+	 * machine where the interpreter it competes with does the same work once
+	 * per opcode inside its own C. It is flushed before every interpreter
+	 * fallback (which reads and writes cpu->Cycles itself) and at the
+	 * epilogue, so cpu->Cycles is authoritative at every point anything else
+	 * can observe it.
+	 */
+	arm_ldr_imm(e, TR_CYC, TR_CPU, offsetof(struct SCPUState, Cycles));
 }
 
 static void tr_epilogue(ArmEmit *e, unsigned mask)
@@ -116,6 +134,7 @@ static void tr_epilogue(ArmEmit *e, unsigned mask)
 	if (mask & TR_USE_A) arm_strh_imm(e, TR_A, TR_REG, offsetof(struct SRegisters, A));
 	if (mask & TR_USE_X) arm_strh_imm(e, TR_X, TR_REG, offsetof(struct SRegisters, X));
 	if (mask & TR_USE_Y) arm_strh_imm(e, TR_Y, TR_REG, offsetof(struct SRegisters, Y));
+	arm_str_imm(e, TR_CYC, TR_CPU, offsetof(struct SCPUState, Cycles));
 	arm_pop(e, TR_SAVES | (1u << ARM_PC));
 }
 
@@ -130,9 +149,7 @@ static void tr_set_carry(ArmEmit *e, int v)
 /* cpu->Cycles += n */
 static void tr_add_cycles(ArmEmit *e, int n)
 {
-	arm_ldr_imm(e, TR_TMP, TR_CPU, offsetof(struct SCPUState, Cycles));
-	arm_add_imm8(e, TR_TMP, TR_TMP, (uint32_t)n);
-	arm_str_imm(e, TR_TMP, TR_CPU, offsetof(struct SCPUState, Cycles));
+	arm_add_imm8(e, TR_CYC, TR_CYC, (uint32_t)n);
 }
 
 /*
@@ -158,6 +175,10 @@ static void tr_emit_fallback(ArmEmit *e, unsigned guest_off, void *fn, unsigned 
 	if (mask & TR_USE_X) arm_strh_imm(e, TR_X, TR_REG, offsetof(struct SRegisters, X));
 	if (mask & TR_USE_Y) arm_strh_imm(e, TR_Y, TR_REG, offsetof(struct SRegisters, Y));
 
+	/* The interpreter routine reads AND writes cpu->Cycles, so the register
+	 * copy has to be published before the call and re-read after it. */
+	arm_str_imm(e, TR_CYC, TR_CPU, offsetof(struct SCPUState, Cycles));
+
 	arm_mov32(e, TR_TMP, guest_off + 1);
 	arm_add_reg(e, TR_TMP, TR_PCBASE, TR_TMP);
 	arm_str_imm(e, TR_TMP, TR_CPU, offsetof(struct SCPUState, PC));
@@ -167,6 +188,7 @@ static void tr_emit_fallback(ArmEmit *e, unsigned guest_off, void *fn, unsigned 
 	arm_mov_reg(e, ARM_R2, TR_CPU);
 	arm_mov32(e, TR_TMP, (uint32_t)(uintptr_t)fn);
 	arm_blx(e, TR_TMP);
+	arm_ldr_imm(e, TR_CYC, TR_CPU, offsetof(struct SCPUState, Cycles));
 
 	if (mask & TR_USE_A) arm_ldrh_imm(e, TR_A, TR_REG, offsetof(struct SRegisters, A));
 	if (mask & TR_USE_X) arm_ldrh_imm(e, TR_X, TR_REG, offsetof(struct SRegisters, X));
@@ -266,9 +288,7 @@ static void tr_commit_load(ArmEmit *e, int Raddr, int Rblock, int Rp,
 	arm_ldrb_reg(e, TR_TMP, TR_TMP, Rblock);
 	if (is_word)
 		arm_mov_shift(e, TR_TMP, TR_TMP, ARM_LSL, 1);   /* MemorySpeed << 1 */
-	arm_ldr_imm(e, TR_TMP2, TR_CPU, offsetof(struct SCPUState, Cycles));
-	arm_add_reg(e, TR_TMP2, TR_TMP2, TR_TMP);
-	arm_str_imm(e, TR_TMP2, TR_CPU, offsetof(struct SCPUState, Cycles));
+	arm_add_reg(e, TR_CYC, TR_CYC, TR_TMP);
 
 	arm_mov32(e, TR_TMP, (uint32_t)(uintptr_t)Memory.BlockIsRAM);
 	arm_ldrb_reg(e, TR_TMP, TR_TMP, Rblock);
@@ -328,9 +348,7 @@ static unsigned tr_emit_lda_abs(ArmEmit *e, const uint8_t *code, unsigned off, i
 	/* Absolute()'s own operand fetch, charged only once we know we are keeping
 	 * the native path. */
 	arm_ldr_imm(e, TR_TMP, TR_CPU, offsetof(struct SCPUState, MemSpeedx2));
-	arm_ldr_imm(e, TR_TMP2, TR_CPU, offsetof(struct SCPUState, Cycles));
-	arm_add_reg(e, TR_TMP2, TR_TMP2, TR_TMP);
-	arm_str_imm(e, TR_TMP2, TR_CPU, offsetof(struct SCPUState, Cycles));
+	arm_add_reg(e, TR_CYC, TR_CYC, TR_TMP);
 
 	tr_commit_load(e, ARM_R0, ARM_R2, ARM_R1, ARM_R1, ARM_R2, !m8);
 
@@ -424,9 +442,7 @@ static unsigned tr_emit_cond_branch(ArmEmit *e, uint8_t op, unsigned off,
 
 	/* --- not taken: Relative()'s operand fetch, then fall through --- */
 	arm_ldr_imm(e, TR_TMP,  TR_CPU, offsetof(struct SCPUState, MemSpeed));
-	arm_ldr_imm(e, TR_TMP2, TR_CPU, offsetof(struct SCPUState, Cycles));
-	arm_add_reg(e, TR_TMP2, TR_TMP2, TR_TMP);
-	arm_str_imm(e, TR_TMP2, TR_CPU, offsetof(struct SCPUState, Cycles));
+	arm_add_reg(e, TR_CYC, TR_CYC, TR_TMP);
 	to_cont = arm_b_cc_fwd(e, ARM_COND_AL);
 
 	/* --- slow: hand the whole opcode to the interpreter, then leave --- */
@@ -482,9 +498,7 @@ static int tr_emit_op(ArmEmit *e, uint8_t op, int m8, int x8)
 static void tr_add_memspeed(ArmEmit *e)
 {
 	arm_ldr_imm(e, TR_TMP,  TR_CPU, offsetof(struct SCPUState, MemSpeed));
-	arm_ldr_imm(e, TR_TMP2, TR_CPU, offsetof(struct SCPUState, Cycles));
-	arm_add_reg(e, TR_TMP2, TR_TMP2, TR_TMP);
-	arm_str_imm(e, TR_TMP2, TR_CPU, offsetof(struct SCPUState, Cycles));
+	arm_add_reg(e, TR_CYC, TR_CYC, TR_TMP);
 }
 
 /*
