@@ -863,3 +863,39 @@ its own `noinline` function so the hot path's frame is sized for the hot path.
 This is the next change, and it is worth measuring the prologue in the
 disassembly before AND after rather than trusting that the split had the
 intended effect -- exactly the mistake section 13 caught.
+
+### Splitting the cold path out: tried, reverted, no device run spent
+
+The obvious reading of that prologue is "GCC sizes it for the union of the hot
+and cold paths, so move the translator out". Done, with `noinline`, and the
+disassembly checked immediately:
+
+```
+   6d038:  mov  r3, #16384
+   6d03c:  push {r4, r5, r6, r7, r8, r9, sl, fp, lr}    <- still nine
+   6d044:  sub  sp, sp, #36                             <- frame GREW, 28 -> 36
+```
+
+Unchanged register set, larger frame. The prologue is not the cold path's
+fault: the hot path itself keeps reg/icpu/cpu/pc/key/m8/x8/slot/native live
+across the call to the translated block, and that is genuinely nine registers.
+Reverted, because it was slightly worse and no clearer.
+
+Checking the disassembly cost nothing and prevented a second silent no-op --
+the change would have measured flat on hardware and been misread as
+"the prologue was not the cost" when in fact the prologue had not moved.
+
+### Where this actually ends
+
+If the per-call frame cannot shrink, then the way to stop paying it is to stop
+making the call: inline the cache probe itself into the dispatch site, the way
+the WRAM rejection already was, and call out only on a miss. The hot case
+becomes a hash, a compare and a jump to the block, with no dyn_exec_step frame
+at all. That is a bigger change -- exec_key/exec_ptr/exec_valid and the hash
+have to become visible to cpuexec.cpp -- and it is the logical endpoint of the
+filter work rather than a quick follow-up, so it wants a session with room to
+verify it properly.
+
+Current standing: **45.98-46.78 frames/s armed against ~52 disarmed**, from
+43.23 against 51.11 when this investigation started. Overhead ~15% -> ~10%,
+with the identical 5,698,515 blocks running throughout.
