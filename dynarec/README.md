@@ -423,6 +423,44 @@ time and does not, so something other than duration is bounding it. Do not
 trust blocks/sec figures (including the "128k vs 96k" noted when LDA landed)
 until this is understood.
 
+## 8c. Next: WRAM blocks with write-invalidation
+
+The 62% from 8b. Sketch, so the next session starts on the design question
+rather than on discovery:
+
+**Measure before choosing a strategy.** The whole decision turns on how often
+a WRAM page that HOLDS CODE is written. Add a counter in the write path first;
+it decides which of these is viable, and guessing here is expensive because
+the write path is the hottest code in the emulator.
+
+  - if code-page writes are rare -> a full cache flush per write is correct
+    and trivial.
+  - if they are frequent (FF6 reinstalls its $001500 trampoline every frame,
+    so at least once a frame is certain) -> a flush costs re-translating
+    everything, ~1,100 blocks per frame. Needs finer granularity.
+
+**Likely shape.** A dirty bitmap over WRAM at 256-byte granularity (512 bits
+for 128K), set when a block is translated from those pages, tested on write.
+Per-slot page tags let a write invalidate only overlapping blocks instead of
+the whole cache; walking 16,384 slots per write is far too slow, so the tag
+wants to be a reverse index (page -> slot list), not a scan.
+
+**Where the write check goes.** S9xSetByte/S9xSetWord in getset.h, and the
+$2180 WRAM port path in ppu.cpp -- DMA reaches WRAM through the latter without
+touching the former, which is the same split that hid a watchpoint bug in
+arm-snesrec earlier. Both need the hook or the cache goes stale silently.
+
+**Do not remove dyn_pc_in_wram().** It becomes the test for "this block needs
+invalidation tracking", not "refuse to translate". The mirror handling it
+already does ($0000-$1FFF of banks $00-$3F and $80-$BF, not just $7E/$7F) is
+exactly what the bitmap indexing needs to get right too.
+
+**Verification.** VERIFY covers single opcodes and cannot see a stale block --
+the failure is a block that should have been thrown away and was not. The test
+is behavioural: FF6's NMI trampoline at $001500 is rewritten every frame, so a
+run that survives with WRAM translation enabled is the evidence. Watch the
+translated count: it should climb well past 1,109 and then stabilise.
+
 ## 9. Gates that cannot be combined, and other traps
 
 - **EXEC and PROFILE are mutually blind.** When a translated block runs,
