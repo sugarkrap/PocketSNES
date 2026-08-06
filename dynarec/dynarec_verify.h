@@ -26,6 +26,11 @@ extern int dyn_verify_on;
 /* Pre-translate the supported opcodes into single-op native stubs. */
 void dyn_verify_init(void);
 
+/* Print the check/divergence counters immediately. The periodic report only
+ * fires every 250k checks, so a bounded run can end having printed nothing --
+ * which is indistinguishable from "the verifier never ran". Call before exit. */
+void dyn_verify_report(void);
+
 /* Does a native stub exist for this opcode? */
 int  dyn_verify_translatable(unsigned char op);
 

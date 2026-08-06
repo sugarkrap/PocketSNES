@@ -118,6 +118,13 @@ static void *exec_translate(struct SICPU *icpu, struct SCPUState *cpu,
 	return entry;
 }
 
+void dyn_exec_report(void)
+{
+	fprintf(stderr, "DYN-EXEC: FINAL %lu blocks run, %lu translated, %lu flushes\n",
+	        e_blocks, e_translated, e_flushes);
+	fflush(stderr);
+}
+
 int dyn_exec_step(struct SRegisters *reg, struct SICPU *icpu, struct SCPUState *cpu)
 {
 	uint32_t pb, pc, key;

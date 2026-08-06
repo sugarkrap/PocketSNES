@@ -66,6 +66,12 @@ int dyn_verify_translatable(unsigned char op)
 	return native_stub[op][0] != 0;
 }
 
+void dyn_verify_report(void)
+{
+	fprintf(stderr, "DYN-VERIFY: FINAL %lu checked, %lu diverged\n", v_total, v_div);
+	fflush(stderr);
+}
+
 void dyn_verify_before(struct SRegisters *reg, struct SICPU *icpu, struct SCPUState *cpu)
 {
 	s_reg  = *reg;    /* struct copies of the pre-opcode state */

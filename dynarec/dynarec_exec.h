@@ -35,6 +35,12 @@ void dyn_exec_init(void);
  * fall through to the normal single-instruction interpreter path. */
 int  dyn_exec_step(struct SRegisters *reg, struct SICPU *icpu, struct SCPUState *cpu);
 
+/* Print the block/translation/flush counters immediately. The periodic report
+ * only fires every 4M blocks, so a bounded run can end having printed nothing
+ * at all -- which reads exactly like "the dynarec never ran" and cost a
+ * hardware run to tell apart. Call this before exiting. */
+void dyn_exec_report(void);
+
 #ifdef __cplusplus
 }
 #endif

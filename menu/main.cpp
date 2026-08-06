@@ -2,6 +2,7 @@
 #include <sal.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <time.h>
 #include <string.h>
 #include "unzip.h"
 #include "zip.h"
@@ -26,6 +27,9 @@
 
 #define SNES_SCREEN_WIDTH  256
 #define SNES_SCREEN_HEIGHT 192
+
+/* PIKO_MAX_SECONDS deadline; 0 = run until told otherwise. See mainEntry. */
+static time_t piko_deadline = 0;
 
 static struct MENU_OPTIONS mMenuOptions;
 static int mEmuScreenHeight;
@@ -451,6 +455,28 @@ int Run(int sound)
 		}
 		done=aim; // Make sure up to date
 		HandleQuickStateRequests();
+		if (piko_deadline && time(NULL) >= piko_deadline) {
+			/*
+			 * exit(), not break. Breaking only leaves the emulation loop and
+			 * drops back to the menu, so the process stays alive -- and with
+			 * no kill on the device, "alive" means the screen stays dark until
+			 * someone power-cycles the board. The whole point of this bound is
+			 * that the process goes away by itself.
+			 */
+			fprintf(stderr, "PIKO_MAX_SECONDS reached, exiting\n");
+#ifdef PIKO_DYNAREC_EXEC
+			if (dyn_exec_on) dyn_exec_report();
+#endif
+#ifdef PIKO_DYNAREC_VERIFY
+			if (dyn_verify_on) dyn_verify_report();
+#endif
+#ifdef PIKO_DYNAREC_PROFILE
+			if (dyn_profile_on) dyn_profile_dump(12, 12);
+#endif
+			fflush(stderr);
+			fflush(stdout);
+			exit(0);
+		}
   	}
 
 	if (sound)
@@ -661,6 +687,27 @@ int mainEntry(int argc, char* argv[])
 	if (getenv("PIKO_JIT_SELFTEST")) {
 		int ok = S9xDynSelfTest();
 		exit(ok ? 0 : 1);
+	}
+	/*
+	 * PIKO_MAX_SECONDS: stop by ourselves after N seconds.
+	 *
+	 * This is not a convenience. There is no way to stop this process from the
+	 * device's own shell: its busybox ships neither a `kill` applet nor a
+	 * `timeout` one, and ash has no kill builtin either -- `kill -9 $pid` exits
+	 * 127. A run started over ssh and left alone therefore cannot be ended
+	 * except by dropping the connection and hoping SIGHUP lands, which is not
+	 * reliable, or by rebooting the board. With matchbox-fbrun holding the
+	 * graphical session down for the duration, that means the screen stays dark
+	 * until someone power-cycles it.
+	 *
+	 * The bound is on TIME rather than frames on purpose: if the emulated
+	 * machine wedges and stops producing frames, a frame count never reaches
+	 * its limit and the bound silently does not exist.
+	 */
+	{
+		const char *ms = getenv("PIKO_MAX_SECONDS");
+		if (ms && *ms)
+			piko_deadline = time(NULL) + (time_t)strtoul(ms, NULL, 0);
 	}
 #ifdef PIKO_DYNAREC_PROFILE
 	/* PROFILE build: PIKO_DYN_PROFILE=1 turns on the observation-only opcode/
