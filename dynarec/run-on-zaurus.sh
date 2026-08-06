@@ -52,7 +52,7 @@
 # Usage:
 #   dynarec/run-on-zaurus.sh [-m MODE] [-w SECONDS] [-r ROM] root@HOST
 #
-#   -m  exec | verify | profile | none      (default: exec)
+#   -m  exec | verify | profile | wramstat | none   (default: exec)
 #   -w  wall-clock seconds to run           (default: 120)
 #   -r  ROM path on the BUILD HOST          (default: the FF6 image used by
 #                                            arm-snesrec, copied if absent)
@@ -89,10 +89,14 @@ TARGET=$1
 HOST=${TARGET#*@}
 
 case "$MODE" in
-	exec)    BUILDFLAG=EXEC=1;    GATE=PIKO_DYN_EXEC=1    ;;
-	verify)  BUILDFLAG=VERIFY=1;  GATE=PIKO_DYN_VERIFY=1  ;;
-	profile) BUILDFLAG=PROFILE=1; GATE=PIKO_DYN_PROFILE=1 ;;
-	none)    BUILDFLAG=;          GATE=                   ;;
+	exec)     BUILDFLAG=EXEC=1;     GATE=PIKO_DYN_EXEC=1    ;;
+	verify)   BUILDFLAG=VERIFY=1;   GATE=PIKO_DYN_VERIFY=1  ;;
+	profile)  BUILDFLAG=PROFILE=1;  GATE=PIKO_DYN_PROFILE=1 ;;
+	# wramstat implies EXEC in the Makefile: the code-page map is built from the
+	# WRAM block starts EXEC dispatch turns away, so without it the run reports
+	# zero code pages and looks like excellent news.
+	wramstat) BUILDFLAG=WRAMSTAT=1; GATE=PIKO_DYN_WRAM=1    ;;
+	none)     BUILDFLAG=;           GATE=                   ;;
 	*) echo "unknown MODE '$MODE'" >&2; exit 2 ;;
 esac
 
@@ -175,5 +179,5 @@ echo
 echo "== summary"
 # The build stamp is first: without it the run used a stale binary and nothing
 # below it means anything.
-grep -E "PIKO build|DYN-(EXEC|VERIFY|PROFILE)|diverged|MAX_SECONDS" "zaurus-${MODE}.log" | tail -12
+grep -E "PIKO build|DYN-(EXEC|VERIFY|PROFILE|WRAM)|diverged|MAX_SECONDS" "zaurus-${MODE}.log" | tail -20
 echo "   full output in zaurus-${MODE}.log"

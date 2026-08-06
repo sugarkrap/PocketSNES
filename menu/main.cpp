@@ -24,6 +24,9 @@
 #ifdef PIKO_DYNAREC_EXEC
 #include "dynarec_exec.h"
 #endif
+#ifdef PIKO_DYNAREC_WRAMSTAT
+#include "dynarec_wram.h"
+#endif
 
 #define SNES_SCREEN_WIDTH  256
 #define SNES_SCREEN_HEIGHT 192
@@ -442,6 +445,12 @@ int Run(int sound)
 
 				//Run SNES for one glorious frame
 				S9xMainLoop ();
+#ifdef PIKO_DYNAREC_WRAMSTAT
+				/* Per-frame, because "code pages dirtied per frame" is the
+				 * cost of invalidation, and it is only meaningful if the
+				 * frame boundary is where the dirty set is cleared. */
+				dyn_wram_frame();
+#endif
 
 				/* Checked per FRAME, not per 10-frame batch: a VERIFY build
 				 * runs at about 1 FPS, so a batch granularity turned a 25s
@@ -457,6 +466,9 @@ int Run(int sound)
 #endif
 #ifdef PIKO_DYNAREC_PROFILE
 					if (dyn_profile_on) dyn_profile_dump(12, 12);
+#endif
+#ifdef PIKO_DYNAREC_WRAMSTAT
+					if (dyn_wram_on) dyn_wram_report();
 #endif
 					fflush(stderr); fflush(stdout);
 					exit(0);
@@ -491,6 +503,9 @@ int Run(int sound)
 #endif
 #ifdef PIKO_DYNAREC_PROFILE
 			if (dyn_profile_on) dyn_profile_dump(12, 12);
+#endif
+#ifdef PIKO_DYNAREC_WRAMSTAT
+			if (dyn_wram_on) dyn_wram_report();
 #endif
 			fflush(stderr);
 			fflush(stdout);
@@ -757,6 +772,18 @@ int mainEntry(int argc, char* argv[])
 	if (getenv("PIKO_DYN_EXEC")) {
 		dyn_exec_init();
 		dyn_exec_on = 1;
+	}
+#endif
+#ifdef PIKO_DYNAREC_WRAMSTAT
+	/* WRAMSTAT build: PIKO_DYN_WRAM=1 measures writes onto WRAM pages that hold
+	 * code. Implies EXEC, which the Makefile arranges; arm both here so a run
+	 * cannot end up with the write hook live and no code-page map to test it
+	 * against -- that combination reports zero and looks like good news. */
+	if (getenv("PIKO_DYN_WRAM")) {
+		dyn_exec_init();
+		dyn_exec_on = 1;
+		dyn_wram_init();
+		dyn_wram_on = 1;
 	}
 #endif
 

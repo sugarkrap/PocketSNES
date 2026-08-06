@@ -423,43 +423,83 @@ time and does not, so something other than duration is bounding it. Do not
 trust blocks/sec figures (including the "128k vs 96k" noted when LDA landed)
 until this is understood.
 
-## 8c. Next: WRAM blocks with write-invalidation
+## 8c. WRAM blocks: the measurement, and what it decided
 
-The 62% from 8b. Sketch, so the next session starts on the design question
-rather than on discovery:
+The dynarec refuses to translate anything running out of WRAM, and 8b said
+that is where most of the work is. Lifting the refusal needs block
+invalidation, and the shape of that depends on one number: **how often does a
+write land on a WRAM page that holds code?** That number was measured before
+any of it was built, because the check lands in the write path -- the hottest
+code in the emulator -- and getting the shape wrong means rewriting it twice.
 
-**Measure before choosing a strategy.** The whole decision turns on how often
-a WRAM page that HOLDS CODE is written. Add a counter in the write path first;
-it decides which of these is viable, and guessing here is expensive because
-the write path is the hottest code in the emulator.
+`make WRAMSTAT=1` + `PIKO_DYN_WRAM=1` (dynarec_wram.[ch]) marks a 256-byte
+WRAM page as holding code the first time a block start is dispatched from it,
+using the real block decoder so a block spanning a page boundary marks both,
+then counts writes against that map.
 
-  - if code-page writes are rare -> a full cache flush per write is correct
-    and trivial.
-  - if they are frequent (FF6 reinstalls its $001500 trampoline every frame,
-    so at least once a frame is certain) -> a flush costs re-translating
-    everything, ~1,100 blocks per frame. Needs finer granularity.
+**The answer** (FF6, 90s on the device, 3,336 frames):
 
-**Likely shape.** A dirty bitmap over WRAM at 256-byte granularity (512 bits
-for 128K), set when a block is translated from those pages, tested on write.
-Per-slot page tags let a write invalidate only overlapping blocks instead of
-the whole cache; walking 16,384 slots per write is far too slow, so the tag
-wants to be a reverse index (page -> slot list), not a scan.
+```
+DYN-EXEC: FINAL 5785482 blocks run, 1109 translated, 0 flushes
+DYN-EXEC: 14838992 dispatches skipped as WRAM (self-modifying)
+DYN-WRAM: 17 code pages, 1479 distinct block starts
+DYN-WRAM: 1682482 WRAM writes (2577686 bytes), 346701 of them onto code pages
+DYN-WRAM: 3336 frames, dirty code pages/frame avg 0.72 max 1
+DYN-WRAM: re-translations/frame avg 0.72 max 1
+DYN-WRAM:   page 015 ($01500-$015FF) 346701 writes, 1 blocks
+```
 
-**Where the write check goes.** S9xSetByte/S9xSetWord in getset.h, and the
-$2180 WRAM port path in ppu.cpp -- DMA reaches WRAM through the latter without
-touching the former, which is the same split that hid a watchpoint bug in
-arm-snesrec earlier. Both need the hook or the cache goes stale silently.
+Two things fall out, and they point opposite ways:
 
-**Do not remove dyn_pc_in_wram().** It becomes the test for "this block needs
-invalidation tracking", not "refuse to translate". The mirror handling it
-already does ($0000-$1FFF of banks $00-$3F and $80-$BF, not just $7E/$7F) is
-exactly what the bitmap indexing needs to get right too.
+**The prize is large.** 14.8M WRAM dispatches against 5.8M ROM blocks run --
+WRAM is ~72% of all block dispatch, and every one of it is interpreted today.
+Only 1,479 distinct block starts serve those 14.8M dispatches: ~10,000
+executions per block. This is the single biggest remaining win.
 
-**Verification.** VERIFY covers single opcodes and cannot see a stale block --
-the failure is a block that should have been thrown away and was not. The test
-is behavioural: FF6's NMI trampoline at $001500 is rewritten every frame, so a
-run that survives with WRAM translation enabled is the evidence. Watch the
-translated count: it should climb well past 1,109 and then stabilise.
+**The cost is nearly nil, but only per-page.** 0.72 dirty code pages per
+frame, never more than one in any frame. Note what that does NOT say: a write
+lands on a code page 346,701 times, ~104 times per frame. Those collapse to
+0.72 invalidations because they all hit the SAME page, and re-dirtying a page
+whose block is already gone is free.
+
+So the two strategies differ by three orders of magnitude:
+
+  - **global flush** on any code-page write: 0.72 flushes/frame x ~1,100+
+    cached blocks = roughly 800 re-translations per frame. Unaffordable.
+  - **per-page invalidation**: 0.72 re-translations per frame. Free.
+
+Per-page it is, with a reverse index (page -> slot list). Scanning all 16,384
+cache slots per write is not an option; but note that the index barely has to
+scale -- one page, holding one block, is the entire working set.
+
+**0.72 is an upper bound, twice over.** A 256-byte page is coarse: the block
+at $001500 is small, so most of those 104 writes/frame are probably data
+living in the same page, not code. And a page only becomes "code" once
+something executes there, so the write that INSTALLS a routine is never
+counted -- correct for measuring steady state, but it means a page written
+once and then only executed shows zero. Both biases make the real cost lower,
+and it is already negligible, so the granularity question is closed.
+
+**Do not remove dyn_pc_in_wram().** It stops meaning "refuse to translate" and
+starts meaning "this block needs invalidation tracking". The mirror handling
+it already does ($0000-$1FFF of banks $00-$3F and $80-$BF, not just $7E/$7F)
+is exactly what the page indexing must also get right: a block cached from
+$00:1500 and a write to $7E:1500 are the same bytes.
+
+**Where the write check goes.** S9xSetByte/S9xSetWord in getset.h, and
+REGISTER_2180 in ppu.h. DMA reaches WRAM through the $2180 port and calls that
+macro directly (dma.cpp) without ever touching the byte path -- the same split
+that hid a watchpoint bug in arm-snesrec, where a watch on the byte path
+reported a confident zero for a region DMA was actively filling. Miss either
+hook and the cache goes stale silently, in the direction that looks like good
+news.
+
+**Verification will be behavioural, not VERIFY.** VERIFY diffs single opcodes
+and cannot see a stale block: the failure is not a wrong opcode, it is a block
+that should have been discarded and was not. The evidence is FF6 surviving
+with WRAM translation on -- its $001500 trampoline is rewritten every frame,
+so a stale cache breaks it immediately -- plus a translated count that climbs
+well past 1,109 and then stabilises.
 
 ## 9. Gates that cannot be combined, and other traps
 

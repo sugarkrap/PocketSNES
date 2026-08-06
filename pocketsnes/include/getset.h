@@ -47,6 +47,11 @@
 #include "dsp1.h"
 #include "cpuexec.h"
 #include "sa1.h"
+#ifdef PIKO_DYNAREC_WRAMSTAT
+/* Directly, not via ppu.h: ppu.h includes memmap.h which includes THIS file,
+ * so getset.h is compiled before ppu.h reaches its own include of this. */
+#include "dynarec_wram.h"
+#endif
 
 INLINE uint8 FASTCALL S9xGetByte (uint32 Address, struct SCPUState * cpu)
 {
@@ -225,6 +230,12 @@ INLINE uint16 S9xGetWord (uint32 Address, struct SCPUState * cpu)
 
 INLINE void S9xSetByte (uint8 Byte, uint32 Address, struct SCPUState * cpu)
 {
+#ifdef PIKO_DYNAREC_WRAMSTAT
+    /* Ahead of the map lookup on purpose: this asks "did the guest write to
+     * WRAM", which is a property of the address, not of which tier serves it.
+     * Non-WRAM writes cost one compare (see dyn_wram_write). */
+    dyn_wram_write (Address, 1);
+#endif
 #if defined(CPU_SHUTDOWN)
     cpu->WaitAddress = NULL;
 #endif
@@ -341,6 +352,9 @@ INLINE void S9xSetByte (uint8 Byte, uint32 Address, struct SCPUState * cpu)
 
 INLINE void FASTCALL S9xSetWord (uint16 Word, uint32 Address, struct SCPUState * cpu)
 {
+#ifdef PIKO_DYNAREC_WRAMSTAT
+    dyn_wram_write (Address, 2);
+#endif
 #if defined(CPU_SHUTDOWN)
     cpu->WaitAddress = NULL;
 #endif

@@ -15,6 +15,9 @@ extern "C" {
 #include "dynarec_arm.h"
 #include "dynarec_block.h"
 #include "dynarec_exec.h"
+#ifdef PIKO_DYNAREC_WRAMSTAT
+#include "dynarec_wram.h"
+#endif
 /* from dynarec_translate.cpp */
 void *dyn_translate_run(const uint8_t *code, int m8, int x8,
                         void *const op_fn_table[256], ArmEmit *e);
@@ -172,13 +175,19 @@ int dyn_exec_step(struct SRegisters *reg, struct SICPU *icpu, struct SCPUState *
 
 	pb = reg->PB;
 	pc = ((uint32_t)pb << 16) | (uint16_t)(cpu->PC - cpu->PCBase);
+	m8 = (reg->P.W & MemoryFlag) != 0;
+	x8 = (reg->P.W & IndexFlag)  != 0;
+
 	if (dyn_pc_in_wram(pc)) {  /* self-modifying: never cache a block from RAM */
 		e_wram_skip++;
+#ifdef PIKO_DYNAREC_WRAMSTAT
+		/* Not translated -- but this is exactly the set of blocks that lifting
+		 * the refusal would cache, so record the pages they occupy. */
+		dyn_wram_saw_block(pc, (const uint8_t *)cpu->PC, m8, x8);
+#endif
 		return 0;
 	}
 
-	m8 = (reg->P.W & MemoryFlag) != 0;
-	x8 = (reg->P.W & IndexFlag)  != 0;
 	key = (pc << 2) | (uint32_t)((m8 ? 2 : 0) | (x8 ? 1 : 0));
 
 	native = exec_find(key, &slot);

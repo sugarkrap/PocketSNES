@@ -111,6 +111,19 @@ CFLAGS   += -DPIKO_DYNAREC_EXEC
 CXXFLAGS += -DPIKO_DYNAREC_EXEC
 endif
 
+# `make WRAMSTAT=1` measures how often the game writes over WRAM that holds
+# code (gated at runtime by PIKO_DYN_WRAM), which is the one number that
+# decides how block invalidation has to be built -- see dynarec_wram.h.
+#
+# It implies EXEC, and not for convenience: the code-page map is built from the
+# block starts dyn_exec_step currently turns away, so without block-driven
+# dispatch there is nothing to mark and the run would report zero code pages
+# while looking perfectly healthy.
+ifdef WRAMSTAT
+CFLAGS   += -DPIKO_DYNAREC_EXEC -DPIKO_DYNAREC_WRAMSTAT
+CXXFLAGS += -DPIKO_DYNAREC_EXEC -DPIKO_DYNAREC_WRAMSTAT
+endif
+
 LDFLAGS = $(CXXFLAGS) \
 		-L$(DEPS_STAGE)/usr/lib -Wl,-rpath-link=$(DEPS_STAGE)/usr/lib \
 		-Wl,-rpath-link=$(SDL_STAGE)/usr/lib \
