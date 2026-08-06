@@ -660,3 +660,59 @@ total can exceed the instructions the emulated CPU actually issued -- and did
 (38.1M, which is more than the machine executes). It is relabelled "block
 contents (static)" in the report. dyn_interp_dispatches counts real
 single-instruction dispatches and is exact.
+
+## 11. Bisecting the ~20%: four hypotheses down, one number that matters
+
+Same binary, same boot, one environment variable apart. `PIKO_DYN_STUB=1` makes
+dyn_exec_step return on its first line, so the call still happens and its body
+does not:
+
+| configuration | frames/s | dispatches/frame |
+|---|---|---|
+| disarmed (no call at all)        | **50.81** | 9,118 |
+| armed, call returns immediately  | **48.46** | 9,153 |
+| armed, full lookup, zero blocks  | **40.38** | 9,322 |
+| armed, blocks running            | **43.70** | 3,410 |
+
+Read down the first column: the CALL costs 4.6%, the BODY costs another 17%,
+and blocks then hand back 8%. So block-driven execution is a real win over
+armed-but-idle -- it is dragging a fixed 21% overhead behind it.
+
+Read across the second column: 9,118 dispatches/frame disarmed against 9,322
+armed. The dynarec is not making the machine do more work; it is making the
+same work slower, per instruction. Those two want opposite fixes, which is why
+this counter is no longer gated on dyn_exec_on.
+
+**What the 17% is not.** Every one of these was tested on hardware, not
+reasoned about:
+
+  - *Not the blocks.* PIKO_DYN_MIN_NATIVE=100 runs ZERO blocks and still
+    measures 40.38.
+  - *Not the number of lookups.* Gating them on control-flow boundaries cut
+    ~23M to ~5.7M with the identical blocks running, and measured SLOWER
+    (39.40 vs 40.91). Reverted.
+  - *Not the table footprint.* PIKO_DYN_SLOTS sweeping 16384/8192/4096/2048 --
+    192 KB down to 24 KB of touched working set, against a 32 KB L1 -- gave
+    43.75 / 43.50 / 44.31 / 44.15. Flat. The D-cache pressure hypothesis, which
+    section 10 called the leading candidate, is **dead**.
+  - *Not the dyn_pc_in_wram call.* Replacing it with the inline
+    dyn_wram_offset_of gave 43.31 against 43.70. Flat.
+
+The third and fourth results explain each other: with WRAM blocks off, most
+dispatches are rejected by the WRAM test BEFORE the hash table is reached, so
+the table was never hot enough for its size to matter.
+
+**What is left in that body**, in order of remaining suspicion: the global
+counters incremented on nearly every dispatch (e_wram_skip, and
+dyn_interp_dispatches in cpuexec.cpp) -- each a load/add/store to a separate
+cache line; the pc reconstruction (reg->PB, cpu->PC, cpu->PCBase, reg->P.W are
+four loads from three structs); and I-cache displacement of the interpreter's
+dispatch loop. The next experiment is the cheapest of those: compile the
+counters out and re-measure. If they are it, that is a satisfying answer, and
+if they are not, the remaining candidates are structural and want the profiler
+pointed at the dispatch loop rather than another guess.
+
+**Do not skip the ablation step.** Four plausible mechanisms in a row were
+wrong, and each cost a build-deploy-measure cycle. The arithmetic was available
+in advance for at least two of them: ~23M lookups of ~20 instructions is on the
+order of 1% of a 90-second run, never 20%.

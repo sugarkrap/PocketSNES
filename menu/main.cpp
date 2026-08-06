@@ -52,6 +52,17 @@ static void piko_report_frames(void)
 	fprintf(stderr, "PIKO: %lu emulated frames in %lds = %lu.%02lu frames/s\n",
 	        piko_frames, secs, piko_frames / (unsigned long)secs,
 	        ((piko_frames % (unsigned long)secs) * 100) / (unsigned long)secs);
+#ifdef PIKO_DYNAREC_EXEC
+	/*
+	 * Outside dyn_exec_report(), which only runs when the dynarec is armed --
+	 * and the whole point of this number is to compare armed against disarmed.
+	 * Instructions/frame separates "slower per instruction" from "causing more
+	 * instructions to run", and those want opposite fixes.
+	 */
+	fprintf(stderr, "PIKO: %lu interpreter dispatches (%lu per frame)\n",
+	        dyn_interp_dispatches,
+	        piko_frames ? dyn_interp_dispatches / piko_frames : 0);
+#endif
 }
 
 static struct MENU_OPTIONS mMenuOptions;
@@ -799,6 +810,9 @@ int mainEntry(int argc, char* argv[])
 		{
 			const char *mn = getenv("PIKO_DYN_MIN_NATIVE");
 			if (mn && *mn) dyn_exec_min_native = (int)strtol(mn, NULL, 0);
+			mn = getenv("PIKO_DYN_SLOTS");
+			if (mn && *mn) dyn_exec_slots = (int)strtol(mn, NULL, 0);
+			if (getenv("PIKO_DYN_STUB")) dyn_exec_stub = 1;
 		}
 		dyn_exec_init();
 		dyn_exec_on = 1;

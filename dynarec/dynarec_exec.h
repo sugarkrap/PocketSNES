@@ -48,6 +48,13 @@ extern int dyn_exec_wram_blocks;
  * translating (PIKO_DYN_MIN_NATIVE). See dynarec_translate.cpp. */
 extern int dyn_exec_min_native;
 
+/* Block-cache slots actually used (PIKO_DYN_SLOTS, rounded down to a power of
+ * two). Shrinking this shrinks the working set the hash probes touch. */
+extern int dyn_exec_slots;
+
+/* PIKO_DYN_STUB=1: dyn_exec_step returns immediately. Ablation only. */
+extern int dyn_exec_stub;
+
 void dyn_exec_init(void);
 
 /* Try to run one translated block starting at the current PC. Returns 1 if a

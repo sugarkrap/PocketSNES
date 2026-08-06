@@ -115,7 +115,19 @@ static uint16_t wram_pg_last[EXEC_SLOTS];
 int dyn_exec_wram_blocks = 0;
 
 
-static inline uint32_t exec_hash(uint32_t k) { return (k * 2654435761u) & EXEC_MASK; }
+/*
+ * Slots actually in use. The arrays stay statically sized; this only limits
+ * which entries get TOUCHED, which is the point -- cache pressure is about the
+ * working set, not the allocation. exec_key/exec_ptr/exec_valid are 64 KB each,
+ * 192 KB probed by a hash, against 32 KB of L1 data cache on the PXA270. If
+ * that is where the ~20% of arming EXEC goes, shrinking this must recover it;
+ * if it does not, the hypothesis is dead. PIKO_DYN_SLOTS sets it.
+ */
+int dyn_exec_slots = EXEC_SLOTS;
+int dyn_exec_stub = 0;
+static uint32_t exec_mask = EXEC_MASK;
+
+static inline uint32_t exec_hash(uint32_t k) { return (k * 2654435761u) & exec_mask; }
 
 static void exec_reset_cache(void)
 {
@@ -203,6 +215,11 @@ void dyn_exec_init(void)
 		return;
 	}
 	code_used = 0;
+	if (dyn_exec_slots < 16) dyn_exec_slots = 16;
+	if (dyn_exec_slots > EXEC_SLOTS) dyn_exec_slots = EXEC_SLOTS;
+	/* round down to a power of two: the hash masks, it does not modulo */
+	while (dyn_exec_slots & (dyn_exec_slots - 1)) dyn_exec_slots &= dyn_exec_slots - 1;
+	exec_mask = (uint32_t)dyn_exec_slots - 1;
 	exec_reset_cache();
 	/* Only make the write path pay for tracking if something will use it. */
 	dyn_wram_tracking = dyn_exec_wram_blocks;
@@ -214,6 +231,8 @@ void dyn_exec_init(void)
 	fprintf(stderr, "DYN-EXEC: armed (%s, min-native %d%%; EXPERIMENTAL)\n",
 	        dyn_exec_wram_blocks ? "ROM + WRAM blocks, write-invalidated"
 	                             : "ROM blocks only", dyn_exec_min_native);
+	fprintf(stderr, "DYN-EXEC: %d cache slots (%d KB touched)\n",
+	        dyn_exec_slots, (dyn_exec_slots * 12) / 1024);
 }
 
 /* Returns the block and, via *slot, where it lives -- the caller needs the slot
@@ -222,8 +241,8 @@ static void *exec_find(uint32_t key, unsigned *slot)
 {
 	uint32_t h = exec_hash(key);
 	unsigned p;
-	for (p = 0; p < EXEC_SLOTS; p++) {
-		unsigned i = (h + p) & EXEC_MASK;
+	for (p = 0; p < (unsigned)dyn_exec_slots; p++) {
+		unsigned i = (h + p) & exec_mask;
 		if (exec_valid[i] == EXEC_EMPTY) return 0;   /* tombstones do NOT stop us */
 		if (exec_valid[i] == EXEC_LIVE && exec_key[i] == key) {
 			*slot = i;
@@ -237,8 +256,8 @@ static unsigned exec_slot_of(uint32_t key)
 {
 	uint32_t h = exec_hash(key);
 	unsigned p;
-	for (p = 0; p < EXEC_SLOTS; p++) {
-		unsigned i = (h + p) & EXEC_MASK;
+	for (p = 0; p < (unsigned)dyn_exec_slots; p++) {
+		unsigned i = (h + p) & exec_mask;
 		if (exec_valid[i] == EXEC_EMPTY) break;
 		if (exec_valid[i] == EXEC_LIVE && exec_key[i] == key) return i;
 	}
@@ -251,8 +270,8 @@ static unsigned exec_insert(uint32_t key, void *entry)
 	uint32_t h = exec_hash(key);
 	unsigned p, tomb = EXEC_SLOTS;
 
-	for (p = 0; p < EXEC_SLOTS; p++) {
-		unsigned i = (h + p) & EXEC_MASK;
+	for (p = 0; p < (unsigned)dyn_exec_slots; p++) {
+		unsigned i = (h + p) & exec_mask;
 		if (exec_valid[i] == EXEC_TOMB) {
 			/* remember the first reusable slot, but keep probing: the key may
 			 * already be live further along the chain */
@@ -396,6 +415,16 @@ int dyn_exec_step(struct SRegisters *reg, struct SICPU *icpu, struct SCPUState *
 	void *native;
 
 	if (!code_buf) return 0;
+	/*
+	 * Ablation knob (PIKO_DYN_STUB=1): keep the call, do nothing. Splits the
+	 * cost of arming EXEC into "the call and its effect on the dispatch loop"
+	 * versus "the work inside this function". Three hypotheses have already
+	 * died here -- the blocks themselves (zero blocks still cost it), the
+	 * number of lookups (4x fewer was slower), and the table footprint (8x
+	 * smaller changed nothing) -- so the next step is to bisect rather than
+	 * guess at a fourth.
+	 */
+	if (dyn_exec_stub) return 0;
 
 	pb = reg->PB;
 	pc = ((uint32_t)pb << 16) | (uint16_t)(cpu->PC - cpu->PCBase);
@@ -412,9 +441,20 @@ int dyn_exec_step(struct SRegisters *reg, struct SICPU *icpu, struct SCPUState *
 	 * translated and invalidated on write instead -- that was 72% of all
 	 * dispatch going to the interpreter (README 8c).
 	 */
-	if (!dyn_exec_wram_blocks && dyn_pc_in_wram(pc)) {
-		e_wram_skip++;
-		return 0;
+	/*
+	 * dyn_wram_offset_of() is the INLINE form of the same test (dynarec_wram.h,
+	 * mirrors and all); dyn_pc_in_wram() is a cross-translation-unit call, and
+	 * this runs on every dispatched instruction. Bisection put ~17% of the cost
+	 * of arming EXEC in this function's body rather than in its hash table --
+	 * which is also why shrinking that table 8x changed nothing: most
+	 * dispatches are rejected right here and never reach it.
+	 */
+	if (!dyn_exec_wram_blocks) {
+		uint32_t woff;
+		if (dyn_wram_offset_of(pc, &woff)) {
+			e_wram_skip++;
+			return 0;
+		}
 	}
 
 	key = (pc << 2) | (uint32_t)((m8 ? 2 : 0) | (x8 ? 1 : 0));
