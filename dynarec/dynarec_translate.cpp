@@ -359,11 +359,18 @@ static void tr_add_memspeed(ArmEmit *e)
  * Returns the block entry pointer, or NULL if an opcode has no fallback, the
  * block runs past the safety cap without an ender, or the buffer overflows.
  */
+/* Set by dyn_translate_run: instructions emitted natively vs left to the
+ * interpreter in the block just translated. The block is a fixed straight-line
+ * run, so these are constant per block and the exec cache can multiply them by
+ * the execution count instead of counting per instruction at run time. */
+unsigned dyn_tr_native, dyn_tr_fallback;
+
 extern "C" void *dyn_translate_run(const uint8_t *code, int m8, int x8,
                                    void *const op_fn_table[256], ArmEmit *e)
 {
 	void *entry = (void *)e->cur;
 	unsigned off = 0;
+	dyn_tr_native = dyn_tr_fallback = 0;
 	tr_prologue(e);
 	for (;;) {
 		uint8_t op = code[off];
@@ -375,11 +382,15 @@ extern "C" void *dyn_translate_run(const uint8_t *code, int m8, int x8,
 			unsigned done = tr_emit_lda_abs(e, code, off, m8);
 			tr_emit_fallback(e, off, op_fn_table[op]);
 			arm_patch_fwd(e, done);
+			dyn_tr_native++;           /* fast path; may bail at run time */
 		} else if (!tr_emit_op(e, op, m8, x8)) {
 			void *fn = op_fn_table[op];
 			if (!fn)
 				return 0;              /* no native + no fallback */
 			tr_emit_fallback(e, off, fn);
+			dyn_tr_fallback++;
+		} else {
+			dyn_tr_native++;
 		}
 		off += (unsigned)dyn_op_length(op, m8, x8);
 		if (ender)

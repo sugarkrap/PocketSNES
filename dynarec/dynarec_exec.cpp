@@ -9,6 +9,8 @@
 #include "65c816.h"
 #include "cpuexec.h"
 
+extern unsigned dyn_tr_native, dyn_tr_fallback;
+
 extern "C" {
 #include "dynarec_arm.h"
 #include "dynarec_block.h"
@@ -32,6 +34,9 @@ static size_t   code_cap, code_used;
 static uint32_t  exec_key[EXEC_SLOTS];
 static void     *exec_ptr[EXEC_SLOTS];
 static int       exec_valid[EXEC_SLOTS];
+static uint16_t  exec_nat[EXEC_SLOTS];    /* native insns in this block   */
+static uint16_t  exec_fb[EXEC_SLOTS];     /* fallback insns in this block */
+static unsigned long e_insn_nat, e_insn_fb, e_wram_skip;
 
 static unsigned long e_blocks, e_translated, e_flushes;
 
@@ -56,19 +61,33 @@ void dyn_exec_init(void)
 	code_used = 0;
 	exec_reset_cache();
 	e_blocks = e_translated = e_flushes = 0;
+	e_insn_nat = e_insn_fb = e_wram_skip = 0;
 	fprintf(stderr, "DYN-EXEC: armed (ROM blocks; EXPERIMENTAL)\n");
 }
 
-static void *exec_find(uint32_t key)
+/* Returns the block and, via *slot, where it lives -- the caller needs the slot
+ * to charge the block's native/fallback instruction counts. */
+static void *exec_find(uint32_t key, unsigned *slot)
 {
 	uint32_t h = exec_hash(key);
 	unsigned p;
 	for (p = 0; p < EXEC_SLOTS; p++) {
 		unsigned i = (h + p) & EXEC_MASK;
 		if (!exec_valid[i]) return 0;
-		if (exec_key[i] == key) return exec_ptr[i];
+		if (exec_key[i] == key) { *slot = i; return exec_ptr[i]; }
 	}
 	return 0;
+}
+
+static unsigned exec_slot_of(uint32_t key)
+{
+	uint32_t h = exec_hash(key);
+	unsigned p;
+	for (p = 0; p < EXEC_SLOTS; p++) {
+		unsigned i = (h + p) & EXEC_MASK;
+		if (exec_valid[i] && exec_key[i] == key) return i;
+	}
+	return EXEC_SLOTS;   /* not found */
 }
 
 static void exec_insert(uint32_t key, void *entry)
@@ -79,9 +98,16 @@ static void exec_insert(uint32_t key, void *entry)
 		unsigned i = (h + p) & EXEC_MASK;
 		if (!exec_valid[i]) {
 			exec_key[i] = key; exec_ptr[i] = entry; exec_valid[i] = 1;
+			exec_nat[i] = (uint16_t)dyn_tr_native;
+			exec_fb[i]  = (uint16_t)dyn_tr_fallback;
 			return;
 		}
-		if (exec_key[i] == key) { exec_ptr[i] = entry; return; }
+		if (exec_key[i] == key) {
+			exec_ptr[i] = entry;
+			exec_nat[i] = (uint16_t)dyn_tr_native;
+			exec_fb[i]  = (uint16_t)dyn_tr_fallback;
+			return;
+		}
 	}
 }
 
@@ -120,8 +146,18 @@ static void *exec_translate(struct SICPU *icpu, struct SCPUState *cpu,
 
 void dyn_exec_report(void)
 {
+	unsigned long tot = e_insn_nat + e_insn_fb;
 	fprintf(stderr, "DYN-EXEC: FINAL %lu blocks run, %lu translated, %lu flushes\n",
 	        e_blocks, e_translated, e_flushes);
+	/*
+	 * The number that says whether translating more opcodes is worth it. The
+	 * PROFILE gate cannot answer this: a translated block jumps past its hook,
+	 * so it only ever sees what the dynarec did NOT run.
+	 */
+	fprintf(stderr, "DYN-EXEC: insns %lu native + %lu fallback = %lu (%lu%% native)\n",
+	        e_insn_nat, e_insn_fb, tot, tot ? (e_insn_nat * 100UL) / tot : 0UL);
+	fprintf(stderr, "DYN-EXEC: %lu dispatches skipped as WRAM (self-modifying)\n",
+	        e_wram_skip);
 	fflush(stderr);
 }
 
@@ -129,26 +165,34 @@ int dyn_exec_step(struct SRegisters *reg, struct SICPU *icpu, struct SCPUState *
 {
 	uint32_t pb, pc, key;
 	int m8, x8;
+	unsigned slot = EXEC_SLOTS;
 	void *native;
 
 	if (!code_buf) return 0;
 
 	pb = reg->PB;
 	pc = ((uint32_t)pb << 16) | (uint16_t)(cpu->PC - cpu->PCBase);
-	if (dyn_pc_in_wram(pc))    /* self-modifying: never cache a block from RAM */
+	if (dyn_pc_in_wram(pc)) {  /* self-modifying: never cache a block from RAM */
+		e_wram_skip++;
 		return 0;
+	}
 
 	m8 = (reg->P.W & MemoryFlag) != 0;
 	x8 = (reg->P.W & IndexFlag)  != 0;
 	key = (pc << 2) | (uint32_t)((m8 ? 2 : 0) | (x8 ? 1 : 0));
 
-	native = exec_find(key);
+	native = exec_find(key, &slot);
 	if (!native) {
 		native = exec_translate(icpu, cpu, m8, x8, key);
 		if (!native) return 0;
+		slot = exec_slot_of(key);
 	}
 
 	((block_fn)native)(reg, icpu, cpu);
+	if (slot < EXEC_SLOTS) {
+		e_insn_nat += exec_nat[slot];
+		e_insn_fb  += exec_fb[slot];
+	}
 	if (((++e_blocks) % 4000000UL) == 0)
 		fprintf(stderr, "DYN-EXEC: %lu blocks run, %lu translated, %lu flushes\n",
 		        e_blocks, e_translated, e_flushes);
