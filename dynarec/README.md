@@ -592,3 +592,71 @@ from interpreter semantics rather than an oversight.
 | `dynarec_verify.cpp` | Live run-both-and-diff validator (`make VERIFY=1`). |
 | `dynarec_exec.{h,cpp}` | Block-driven execution: blocks drive the CPU (`make EXEC=1`). |
 | `README.md`  | This document. |
+
+## 10. Branches, and the ~20% that is still unexplained
+
+BPL/BNE/BEQ are translated natively and, more importantly, **no longer end a
+block**: the not-taken path continues straight into the following
+instructions. They were 36% of everything executed and every one of them cut a
+block short, which is why blocks averaged 2.66 instructions.
+
+The taken path deliberately calls the interpreter's own Op10/OpD0/OpF0 and
+exits the block. Op10 is not "add a signed byte to PC": it runs a BranchCheck
+macro whose behaviour depends on cpu->BranchSkip and Settings.SoundSkipMethod
+(BranchCheck1 and BranchCheck2 differ), then CPUShutdown, the idle-loop
+detector. Reimplementing that in generated code to save a call on the path
+that leaves the block anyway would trade the correctness of the common
+not-taken path for almost nothing.
+
+It works. Blocks got 2.2x longer (2.66 -> 6.69 static instructions), VERIFY
+passes 15,787 checks with 0 divergences, and FF6 runs.
+
+**Throughput did not move.** 40.54 frames/s, against 40.47 before branches and
+41.15 before that. Three substantial optimisations -- per-block register
+pinning, declining all-fallback blocks, native branches with fall-through --
+all correct, all verified, none measurable.
+
+### What the min-native sweep showed, and what it did not
+
+`PIKO_DYN_MIN_NATIVE=N` refuses blocks less than N% native. Swept on one boot:
+
+| min-native | blocks run | frames/s |
+|---|---|---|
+| 1%   | 3,900,000 | 43.61 |
+| 60%  | 3,237,165 | 42.06 |
+| 90%  | **0**     | 40.80 |
+| 100% | **0**     | 40.78 |
+
+At 90% and above NO blocks run at all -- and it still measures 40.8, against
+50.57 for the same binary with the dynarec simply disarmed. So the ~20% cost
+of EXEC is **not the blocks**. It is paid before any block executes.
+
+The obvious suspect was dyn_exec_step's cache lookup on every dispatch. That
+was tested and it is wrong: gating the lookup on "the previous instruction
+ended a block" cut lookups from ~23M to ~5.7M with the identical set of blocks
+still running, and measured SLOWER (39.40 vs 40.91). The gate is reverted; the
+arithmetic also disagrees with the hypothesis, since ~23M lookups of ~20
+instructions is on the order of 1% of a 90-second run, not 20%.
+
+The leading remaining candidate is D-cache pressure rather than instruction
+count. exec_key/exec_ptr/exec_valid are 64 KB each, 192 KB of tables probed by
+a hash, on a PXA270 with a 32 KB L1 data cache -- so every lookup is likely to
+miss AND to evict the interpreter's own hot data (opcode table, CPU state).
+That would explain why cutting the NUMBER of lookups by 4x did not help: the
+working set is what matters, not the count. It also predicts the fix is to
+shrink the cache (a small direct-mapped table, 16-bit slot indices, one array
+instead of three) rather than to consult it less often.
+
+That is a prediction, not a result. The way to settle it is to shrink the
+tables and re-measure, and it is where the next session should start --
+**before** any more opcodes are translated, because until this is understood
+every opcode added is being measured through a 20% fog.
+
+### A measurement that stopped being trustworthy
+
+"insns native + fallback" is now a STATIC count: each dispatch charges the
+block's whole translated length, and since a taken branch exits early, the
+total can exceed the instructions the emulated CPU actually issued -- and did
+(38.1M, which is more than the machine executes). It is relabelled "block
+contents (static)" in the report. dyn_interp_dispatches counts real
+single-instruction dispatches and is exact.

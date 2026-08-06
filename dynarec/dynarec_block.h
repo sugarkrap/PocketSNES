@@ -32,6 +32,22 @@ int dyn_op_length(uint8_t op, int m8, int x8);
  * the block's validity -- plus STP/WAI (halt) and MVP/MVN (self-repeating). */
 int dyn_op_is_block_end(uint8_t op);
 
+/* The same answer as a table, for callers on the hot path (cpuexec.cpp asks
+ * once per dispatched instruction; a call plus a compare chain showed up in
+ * the frame rate). */
+extern const uint8_t dyn_block_end_tab[256];
+
+/* True if `op` is a conditional branch the translator emits natively (its
+ * not-taken path continues the block). */
+int dyn_op_is_cond_branch(uint8_t op);
+
+/* True if `op` terminates a TRANSLATED block. Differs from
+ * dyn_op_is_block_end only for the branches above. Everything that walks a
+ * block the way the translator does -- notably the WRAM page-span computation
+ * in dynarec_exec.cpp -- must use THIS, or it will stop early and leave the
+ * block's tail untracked. */
+int dyn_op_ends_translation(uint8_t op);
+
 /* True if the 24-bit guest address `pc` lands in WRAM, INCLUDING its mirrors.
  * A translated block is a snapshot of the bytes it was built from, so code in
  * writable memory must never be cached: the game can rewrite it underneath us

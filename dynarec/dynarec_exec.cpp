@@ -11,6 +11,7 @@
 
 extern unsigned dyn_tr_native, dyn_tr_fallback;
 extern unsigned long dyn_tr_declined_nonative;
+extern unsigned long dyn_tr_declined_toolong;
 extern int dyn_tr_last_declined;
 
 extern "C" {
@@ -28,6 +29,13 @@ void *dyn_translate_run(const uint8_t *code, int m8, int x8,
 }
 
 int dyn_exec_on = 0;
+
+/* Bumped by cpuexec.cpp for every single-instruction interpreter dispatch. */
+unsigned long dyn_interp_dispatches;
+
+/* 1 = the current pc is a plausible block entry, so a cache lookup is worth
+ * doing. Starts set; cpuexec.cpp maintains it. */
+int dyn_try_block = 1;
 
 typedef void (*block_fn)(struct SRegisters *, struct SICPU *, struct SCPUState *);
 
@@ -202,9 +210,10 @@ void dyn_exec_init(void)
 	e_insn_nat = e_insn_fb = e_wram_skip = 0;
 	e_wram_blocks = e_inval_calls = e_inval_blocks = e_wram_full = 0;
 	e_declined_hits = 0;
-	fprintf(stderr, "DYN-EXEC: armed (%s; EXPERIMENTAL)\n",
+	dyn_interp_dispatches = 0;
+	fprintf(stderr, "DYN-EXEC: armed (%s, min-native %d%%; EXPERIMENTAL)\n",
 	        dyn_exec_wram_blocks ? "ROM + WRAM blocks, write-invalidated"
-	                             : "ROM blocks only");
+	                             : "ROM blocks only", dyn_exec_min_native);
 }
 
 /* Returns the block and, via *slot, where it lives -- the caller needs the slot
@@ -329,7 +338,7 @@ static void *exec_translate(struct SICPU *icpu, struct SCPUState *cpu,
 		unsigned o = 0;
 		for (;;) {
 			uint8_t op = c[o];
-			int ender = dyn_op_is_block_end(op);
+			int ender = dyn_op_ends_translation(op);
 			o += (unsigned)dyn_op_length(op, m8, x8);
 			if (ender || o >= DYN_BLOCK_MAX_BYTES) break;
 		}
@@ -345,12 +354,23 @@ void dyn_exec_report(void)
 	fprintf(stderr, "DYN-EXEC: FINAL %lu blocks run, %lu translated, %lu flushes\n",
 	        e_blocks, e_translated, e_flushes);
 	/*
-	 * The number that says whether translating more opcodes is worth it. The
-	 * PROFILE gate cannot answer this: a translated block jumps past its hook,
-	 * so it only ever sees what the dynarec did NOT run.
+	 * STATIC instruction counts: each dispatch charges the block's whole
+	 * translated length. That was exact until branches stopped ending blocks;
+	 * now a taken branch exits early, so these are UPPER BOUNDS and the split
+	 * is "what the block contains", not "what it ran". Do not read them as
+	 * executed-instruction counts -- they can exceed the instructions the
+	 * emulated CPU actually issued, and did.
 	 */
-	fprintf(stderr, "DYN-EXEC: insns %lu native + %lu fallback = %lu (%lu%% native)\n",
+	fprintf(stderr, "DYN-EXEC: block contents (static) %lu native + %lu fallback = %lu (%lu%% native)\n",
 	        e_insn_nat, e_insn_fb, tot, tot ? (e_insn_nat * 100UL) / tot : 0UL);
+	/*
+	 * The coverage question, and the one that decides whether any of this can
+	 * pay: how many instructions does the interpreter dispatch one at a time,
+	 * outside any block? If that dominates, the dynarec is not in the hot path
+	 * and making blocks better cannot matter.
+	 */
+	fprintf(stderr, "DYN-EXEC: %lu instructions dispatched outside blocks\n",
+	        dyn_interp_dispatches);
 	fprintf(stderr, "DYN-EXEC: %lu dispatches skipped as WRAM (self-modifying)\n",
 	        e_wram_skip);
 	/*
@@ -363,8 +383,8 @@ void dyn_exec_report(void)
 	        e_wram_blocks, e_inval_blocks, e_inval_calls);
 	/* Blocks refused as all-fallback. These are dispatched by the interpreter
 	 * instead, which is strictly cheaper than wrapping them in a prologue. */
-	fprintf(stderr, "DYN-EXEC: %lu blocks declined (no native instruction), %lu cached-refusal hits\n",
-	        dyn_tr_declined_nonative, e_declined_hits);
+	fprintf(stderr, "DYN-EXEC: %lu declined all-fallback, %lu declined too-long, %lu cached-refusal hits\n",
+	        dyn_tr_declined_nonative, dyn_tr_declined_toolong, e_declined_hits);
 	fflush(stderr);
 }
 

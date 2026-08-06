@@ -90,6 +90,9 @@ static int tr_op_native_mask(uint8_t op)
 	case 0xE8: case 0xCA:            return TR_USE_X;   /* INX/DEX     */
 	case 0xC8: case 0x88:            return TR_USE_Y;   /* INY/DEY     */
 	case 0xAD:                       return TR_USE_A;   /* LDA abs     */
+	/* Conditional branches: native, and they touch none of A/X/Y. Like 0xAD
+	 * they need op_fn_table[op] for the taken path, which the callers check. */
+	case 0x10: case 0xD0: case 0xF0: return 0;
 	default:                         return -1;
 	}
 }
@@ -348,6 +351,97 @@ static unsigned tr_emit_lda_abs(ArmEmit *e, const uint8_t *code, unsigned off, i
 	return done;
 }
 
+/*
+ * Conditional branch (BPL/BNE/BEQ), the opcodes that were 36% of everything
+ * executed AND the reason blocks averaged 2.66 instructions: every one of them
+ * ended a block.
+ *
+ * Shape -- fast path is NOT TAKEN, which continues straight into the rest of
+ * the block; everything else exits through the interpreter:
+ *
+ *     if (cpu->BranchSkip)   goto slow      // sound-skip; normally false
+ *     if (branch taken)      goto slow      // interpreter sets PC/cycles
+ *     cpu->Cycles += MemSpeed               // Relative()'s operand fetch
+ *     goto cont
+ *   slow:
+ *     cpu->PCAtOpcodeStart = pcbase + off
+ *     <interpreter fallback>                // exact semantics, whatever they are
+ *     goto exit                             // leave the block; PC is authoritative
+ *   cont:
+ *
+ * Sending the TAKEN case to the interpreter rather than computing the target
+ * here is deliberate. Op10/OpD0/OpF0 are not just "add a signed byte to PC":
+ * each runs a BranchCheck macro whose behaviour depends on cpu->BranchSkip and
+ * Settings.SoundSkipMethod (BranchCheck1 and BranchCheck2 differ), and then
+ * CPUShutdown, which is the idle-loop detector. Reimplementing that in
+ * generated code to save a call on the path that leaves the block anyway would
+ * be trading the whole point -- correctness of the common not-taken path --
+ * for very little.
+ *
+ * Not-taken charges MemSpeed and nothing else: Relative() adds it for the
+ * operand fetch, BranchCheck is a no-op with BranchSkip clear, and the
+ * ONE_CYCLE penalty is inside the taken branch only.
+ *
+ * PCAtOpcodeStart is set before the fallback because cpuexec.cpp's dispatch
+ * loop -- which normally does it for every instruction -- is exactly what a
+ * block skips. CPUShutdown compares cpu->PC against cpu->WaitAddress, and
+ * WaitAddress is derived from PCAtOpcodeStart, so a stale one turns the idle
+ * detector into a random number generator.
+ *
+ * Returns the word index of the block-exit branch, for the caller to patch to
+ * the epilogue.
+ */
+static unsigned tr_emit_cond_branch(ArmEmit *e, uint8_t op, unsigned off,
+                                    void *fn, unsigned mask)
+{
+	unsigned to_slow_skip, to_slow_taken, to_cont, to_exit;
+	int taken_cc;
+
+	/* BranchSkip is bool8_32, which port.h makes an unsigned char. */
+	arm_ldrb_imm(e, TR_TMP, TR_CPU, offsetof(struct SCPUState, BranchSkip));
+	arm_cmp_imm(e, TR_TMP, 0);
+	to_slow_skip = arm_b_cc_fwd(e, ARM_NE);
+
+	switch (op) {
+	case 0xD0:  /* BNE: taken if !CHECKZERO(), i.e. _Zero != 0 */
+		arm_ldrb_imm(e, TR_TMP, TR_ICPU, offsetof(struct SICPU, _Zero));
+		arm_cmp_imm(e, TR_TMP, 0);
+		taken_cc = ARM_NE;
+		break;
+	case 0xF0:  /* BEQ: taken if CHECKZERO(), i.e. _Zero == 0 */
+		arm_ldrb_imm(e, TR_TMP, TR_ICPU, offsetof(struct SICPU, _Zero));
+		arm_cmp_imm(e, TR_TMP, 0);
+		taken_cc = ARM_EQ;
+		break;
+	default:    /* 0x10 BPL: taken if !CHECKNEGATIVE(), i.e. !(_Negative & 0x80) */
+		arm_ldrb_imm(e, TR_TMP, TR_ICPU, offsetof(struct SICPU, _Negative));
+		arm_and_imm(e, TR_TMP, TR_TMP, 0x80, 0);
+		arm_cmp_imm(e, TR_TMP, 0);
+		taken_cc = ARM_EQ;
+		break;
+	}
+	to_slow_taken = arm_b_cc_fwd(e, taken_cc);
+
+	/* --- not taken: Relative()'s operand fetch, then fall through --- */
+	arm_ldr_imm(e, TR_TMP,  TR_CPU, offsetof(struct SCPUState, MemSpeed));
+	arm_ldr_imm(e, TR_TMP2, TR_CPU, offsetof(struct SCPUState, Cycles));
+	arm_add_reg(e, TR_TMP2, TR_TMP2, TR_TMP);
+	arm_str_imm(e, TR_TMP2, TR_CPU, offsetof(struct SCPUState, Cycles));
+	to_cont = arm_b_cc_fwd(e, ARM_COND_AL);
+
+	/* --- slow: hand the whole opcode to the interpreter, then leave --- */
+	arm_patch_fwd(e, to_slow_skip);
+	arm_patch_fwd(e, to_slow_taken);
+	arm_mov32(e, TR_TMP, off);
+	arm_add_reg(e, TR_TMP, TR_PCBASE, TR_TMP);
+	arm_str_imm(e, TR_TMP, TR_CPU, offsetof(struct SCPUState, PCAtOpcodeStart));
+	tr_emit_fallback(e, off, fn, mask);
+	to_exit = arm_b_cc_fwd(e, ARM_COND_AL);
+
+	arm_patch_fwd(e, to_cont);
+	return to_exit;
+}
+
 /* Emit one opcode. Returns 1 if translated natively, 0 if not yet supported.
  * m8/x8 = current accumulator/index width (blocks are mode-specific). */
 static int tr_emit_op(ArmEmit *e, uint8_t op, int m8, int x8)
@@ -412,6 +506,15 @@ unsigned dyn_tr_native, dyn_tr_fallback;
 /* Blocks declined because translating them could only lose. Reported by
  * DYN-EXEC so the decision is visible rather than assumed. */
 unsigned long dyn_tr_declined_nonative;
+unsigned long dyn_tr_declined_toolong;
+
+/* Minimum percentage of a block's instructions that must be native for the
+ * block to be worth translating. 1 = the old "any native op will do". */
+int dyn_exec_min_native = 1;
+
+/* Taken-branch exits a single block may have. Generous: blocks cap at 1024
+ * guest bytes, and a two-byte branch every two bytes is not real code. */
+#define TR_MAX_EXITS 64
 
 /* Set when the most recent dyn_translate_run declined for lack of any native
  * instruction -- a permanent property of those guest bytes, so the caller can
@@ -424,7 +527,9 @@ extern "C" void *dyn_translate_run(const uint8_t *code, int m8, int x8,
 {
 	void *entry = (void *)e->cur;
 	unsigned off = 0;
-	unsigned mask = 0, n_native = 0;
+	unsigned mask = 0, n_native = 0, n_fallback = 0;
+	/* Block exits from taken branches, all patched to the single epilogue. */
+	unsigned exits[TR_MAX_EXITS], n_exits = 0, i;
 
 	dyn_tr_last_declined = 0;
 
@@ -441,16 +546,50 @@ extern "C" void *dyn_translate_run(const uint8_t *code, int m8, int x8,
 	 */
 	for (;;) {
 		uint8_t op = code[off];
-		int ender = dyn_op_is_block_end(op);
+		int ender = dyn_op_ends_translation(op);
 		int nm    = tr_op_native_mask(op);
-		int native = (op == 0xAD) ? (op_fn_table[op] != 0) : (nm >= 0);
+		int needs_fn = (op == 0xAD) || dyn_op_is_cond_branch(op);
+		int native = needs_fn ? (op_fn_table[op] != 0) : (nm >= 0);
+		/* A branch we cannot give a fallback to must end the block: without the
+		 * taken-path exit, execution would run straight on into instructions
+		 * the guest would have branched away from. */
+		if (!native && dyn_op_is_cond_branch(op)) {
+			dyn_tr_last_declined = 1;
+			return 0;
+		}
 		if (native) { n_native++; if (nm >= 0) mask |= (unsigned)nm; }
+		else        { n_fallback++; }
 		off += (unsigned)dyn_op_length(op, m8, x8);
 		if (ender) break;
-		if (off >= DYN_BLOCK_MAX_BYTES)
-			return 0;                  /* no ender in range: let the interpreter run it */
+		if (off >= DYN_BLOCK_MAX_BYTES) {
+			/*
+			 * No ender within the cap: let the interpreter run it -- but CACHE
+			 * the refusal. Branches no longer end a block, so hitting this is
+			 * far more likely than it used to be, and an uncached refusal
+			 * means re-walking a kilobyte of guest code on every single
+			 * dispatch. That exact mistake cost 12 frames/s an hour ago.
+			 */
+			dyn_tr_declined_toolong++;
+			dyn_tr_last_declined = 1;
+			return 0;
+		}
 	}
-	if (n_native == 0) {
+	/*
+	 * Is this block worth building at all?
+	 *
+	 * A fallback INSIDE a block is dearer than the same opcode dispatched by
+	 * the interpreter: it pays the block's calling convention (spill, set
+	 * cpu->PC, load the fn address, blx, reload) on top of the interpreter
+	 * routine it then calls, where plain dispatch is a table index and a call.
+	 * So a block only pays for itself if it is mostly native, and the useful
+	 * knob is the RATIO, not "at least one".
+	 *
+	 * dyn_exec_min_native is that ratio in percent, settable at run time
+	 * (PIKO_DYN_MIN_NATIVE) so the threshold can be swept on one boot instead
+	 * of guessed at across rebuilds.
+	 */
+	if (n_native == 0 ||
+	    (n_native * 100u) / (n_native + n_fallback) < (unsigned)dyn_exec_min_native) {
 		dyn_tr_declined_nonative++;
 		dyn_tr_last_declined = 1;
 		return 0;
@@ -463,9 +602,15 @@ extern "C" void *dyn_translate_run(const uint8_t *code, int m8, int x8,
 	tr_prologue(e, mask);
 	for (;;) {
 		uint8_t op = code[off];
-		int ender = dyn_op_is_block_end(op);
+		int ender = dyn_op_ends_translation(op);
 		tr_add_memspeed(e);
-		if (op == 0xAD && op_fn_table[op]) {
+		if (dyn_op_is_cond_branch(op)) {
+			if (n_exits >= TR_MAX_EXITS)
+				return 0;      /* absurdly branchy block; let the interpreter have it */
+			exits[n_exits++] = tr_emit_cond_branch(e, op, off,
+			                                       op_fn_table[op], mask);
+			dyn_tr_native++;
+		} else if (op == 0xAD && op_fn_table[op]) {
 			/* Native fast path, then the interpreter fallback the run-time
 			 * bail branches into. Verified on hardware: 0 divergences. */
 			unsigned done = tr_emit_lda_abs(e, code, off, m8);
@@ -492,6 +637,10 @@ extern "C" void *dyn_translate_run(const uint8_t *code, int m8, int x8,
 		if (off >= DYN_BLOCK_MAX_BYTES)
 			return 0;
 	}
+	/* Every taken-branch exit lands on the one epilogue, so the register
+	 * spilling happens exactly once no matter how the block is left. */
+	for (i = 0; i < n_exits; i++)
+		arm_patch_fwd(e, exits[i]);
 	tr_epilogue(e, mask);
 	return e->overflow ? 0 : entry;
 }
@@ -502,6 +651,7 @@ extern "C" void *dyn_translate_ops(const uint8_t *ops, int n, ArmEmit *e,
 	void *entry = (void *)e->cur;
 	unsigned off = 0;
 	unsigned mask = 0;
+	unsigned exits[TR_MAX_EXITS], n_exits = 0;
 	int i;
 
 	/*
@@ -517,7 +667,12 @@ extern "C" void *dyn_translate_ops(const uint8_t *ops, int n, ArmEmit *e,
 	tr_prologue(e, mask);
 	for (i = 0; i < n; i++) {
 		uint8_t op = ops[i];
-		if (op == 0xAD) {
+		if (dyn_op_is_cond_branch(op)) {
+			void *fn = op_fn_table ? op_fn_table[op] : 0;
+			if (!fn || n_exits >= TR_MAX_EXITS)
+				return 0;
+			exits[n_exits++] = tr_emit_cond_branch(e, op, off, fn, mask);
+		} else if (op == 0xAD) {
 			/* The caller MUST supply an opcode table: the fast path can bail
 			 * at run time (I/O addresses), and the bail has to land on the
 			 * interpreter. Without one there is nowhere to go. */
@@ -536,6 +691,8 @@ extern "C" void *dyn_translate_ops(const uint8_t *ops, int n, ArmEmit *e,
 		}
 		off += (unsigned)dyn_op_length(op, m8, x8);
 	}
+	for (i = 0; i < (int)n_exits; i++)
+		arm_patch_fwd(e, exits[i]);
 	tr_epilogue(e, mask);
 	return e->overflow ? 0 : entry;
 }

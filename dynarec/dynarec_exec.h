@@ -29,12 +29,24 @@ struct SCPUState;
 
 extern int dyn_exec_on;
 
+/* Instructions the interpreter dispatched individually (i.e. NOT inside a
+ * translated block). Together with the block counters this says how much of
+ * the workload the dynarec actually sees. */
+extern unsigned long dyn_interp_dispatches;
+
+/* Gate on the per-dispatch block lookup; see cpuexec.cpp. */
+extern int dyn_try_block;
+
 /* 1 = also translate blocks running out of WRAM. Default 0: the mechanism is
  * correct but currently costs 24% (see dynarec_exec.cpp). Set by
  * PIKO_DYN_WRAM_BLOCKS=1, which is how the two get compared on ONE boot --
  * comparing across a device reboot has already produced numbers that turned
  * out not to be comparable. */
 extern int dyn_exec_wram_blocks;
+
+/* Minimum %% of a block's instructions that must be native before it is worth
+ * translating (PIKO_DYN_MIN_NATIVE). See dynarec_translate.cpp. */
+extern int dyn_exec_min_native;
 
 void dyn_exec_init(void);
 

@@ -99,31 +99,71 @@ int dyn_pc_in_wram(uint32_t pc)
 	return 0;
 }
 
-int dyn_op_is_block_end(uint8_t op)
+/*
+ * The conditional branches the translator emits natively, with the NOT-TAKEN
+ * path continuing the block instead of ending it.
+ *
+ * This is why it is a separate list from dyn_op_is_block_end: a branch we do
+ * NOT emit natively still has to end the block, because its interpreter
+ * fallback can leave cpu->PC anywhere and the bytes after it are then not
+ * necessarily what runs next. Only a branch whose taken path we generate an
+ * explicit block exit for may fall through.
+ *
+ * Keep in step with tr_emit_cond_branch's switch. Listing an opcode here that
+ * the translator does not actually emit would let a block run straight through
+ * a taken branch into the wrong instructions.
+ */
+int dyn_op_is_cond_branch(uint8_t op)
 {
 	switch (op) {
-	/* conditional/unconditional branches */
-	case 0x10: case 0x30: case 0x50: case 0x70:
-	case 0x80: case 0x90: case 0xB0: case 0xD0: case 0xF0:
-	case 0x82:                              /* BRL */
-	/* jumps */
-	case 0x4C: case 0x5C: case 0x6C: case 0x7C: case 0xDC:
-	/* subroutine calls */
-	case 0x20: case 0x22: case 0xFC:
-	/* returns */
-	case 0x40: case 0x60: case 0x6B:        /* RTI RTS RTL */
-	/* software interrupts */
-	case 0x00: case 0x02:                   /* BRK COP */
-	/* mode / flag changes (swap the live opcode table) */
-	case 0x28: case 0xC2: case 0xE2: case 0xFB: /* PLP REP SEP XCE */
-	/* halts */
-	case 0xCB: case 0xDB:                   /* WAI STP */
-	/* block moves (self-repeating; decrement-and-reenter PC) */
-	case 0x44: case 0x54:                   /* MVP MVN */
+	case 0x10:   /* BPL */
+	case 0xD0:   /* BNE */
+	case 0xF0:   /* BEQ */
 		return 1;
 	default:
 		return 0;
 	}
+}
+
+int dyn_op_ends_translation(uint8_t op)
+{
+	if (dyn_op_is_cond_branch(op))
+		return 0;
+	return dyn_op_is_block_end(op);
+}
+
+/*
+ * Block-ender lookup, as a TABLE rather than a switch.
+ *
+ * cpuexec.cpp consults this on every interpreter dispatch to decide whether
+ * the next pc is worth a block-cache lookup, so it is genuinely hot. The
+ * switch form cost a cross-translation-unit call plus a compare chain and
+ * measured 40.91 -> 38.96 frames/s; one indexed byte load does not.
+ */
+const uint8_t dyn_block_end_tab[256] = {
+	/* software interrupts */
+	[0x00] = 1, [0x02] = 1,                                     /* BRK COP  */
+	/* conditional/unconditional branches */
+	[0x10] = 1, [0x30] = 1, [0x50] = 1, [0x70] = 1,
+	[0x80] = 1, [0x90] = 1, [0xB0] = 1, [0xD0] = 1, [0xF0] = 1,
+	[0x82] = 1,                                                 /* BRL      */
+	/* jumps */
+	[0x4C] = 1, [0x5C] = 1, [0x6C] = 1, [0x7C] = 1, [0xDC] = 1,
+	/* subroutine calls */
+	[0x20] = 1, [0x22] = 1, [0xFC] = 1,
+	/* returns */
+	[0x40] = 1, [0x60] = 1, [0x6B] = 1,                         /* RTI RTS RTL */
+	/* mode / flag changes (swap the live opcode table) */
+	[0x28] = 1, [0xC2] = 1, [0xE2] = 1, [0xFB] = 1,             /* PLP REP SEP XCE */
+	/* halts */
+	[0xCB] = 1, [0xDB] = 1,                                     /* WAI STP  */
+	/* block moves (self-repeating; decrement-and-reenter PC) */
+	[0x44] = 1, [0x54] = 1,                                     /* MVP MVN  */
+};
+
+int dyn_op_is_block_end(uint8_t op)
+{
+	return dyn_block_end_tab[op];
 }
 
 int dyn_discover_block(const uint8_t *code, uint32_t start_pc,

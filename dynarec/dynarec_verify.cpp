@@ -41,7 +41,8 @@ typedef void (*stub_fn)(struct SRegisters *, struct SICPU *, struct SCPUState *)
 static const uint8_t v_want[] = {
 	0x18 /*CLC*/, 0x38 /*SEC*/, 0xEA /*NOP*/,
 	0xE8 /*INX*/, 0xC8 /*INY*/, 0xCA /*DEX*/, 0x88 /*DEY*/,
-	0xAD /*LDA abs*/
+	0xAD /*LDA abs*/,
+	0x10 /*BPL*/, 0xD0 /*BNE*/, 0xF0 /*BEQ*/
 };
 static uint8_t        v_is_native[256];
 static void          *v_optab[256];
@@ -123,6 +124,28 @@ void dyn_verify_after(unsigned char op, struct SRegisters *reg,
 	 * re-runnable. So probe the same Map the emitted code probes, in C, and
 	 * only verify when the address is direct memory.
 	 */
+	/*
+	 * Branches: verify the NOT-TAKEN case only, and that is not a weakening --
+	 * it is the only case with generated code in it. The taken path of a
+	 * translated branch calls the interpreter's own Op10/OpD0/OpF0, so
+	 * verifying it would compare the interpreter against itself; worse, it
+	 * would RUN it a second time, and the taken path reaches CPUShutdown,
+	 * which on an idle loop runs APU_EXECUTE1() until the next event. That is
+	 * a global side effect, not something confined to our scratch copy -- the
+	 * same trap as LDA $4210 clearing RDNMI.
+	 *
+	 * Not-taken is also where the dangerous failure lives. If the emitted flag
+	 * test says "not taken" when the interpreter branched, the block runs on
+	 * into instructions the guest jumped away from; the interpreter charged
+	 * MemSpeed + ONE_CYCLE and we charged MemSpeed, so the cycle diff catches
+	 * it. (The opposite error -- taking the slow path when we could have
+	 * continued -- is safe, merely slower, and correctly invisible here.)
+	 */
+	if (op == 0x10 || op == 0xD0 || op == 0xF0) {
+		if ((const unsigned char *)cpu->PC != (const unsigned char *)s_cpu.PC + 2)
+			return;                       /* interpreter took it: not ours to check */
+	}
+
 	if (op == 0xAD) {
 		uint32_t a = (uint32_t)(((const unsigned char *)s_cpu.PC)[1]
 		           | (((const unsigned char *)s_cpu.PC)[2] << 8))

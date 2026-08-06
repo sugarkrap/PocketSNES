@@ -796,6 +796,10 @@ int mainEntry(int argc, char* argv[])
 	if (getenv("PIKO_DYN_EXEC")) {
 		/* Before dyn_exec_init: it prints which mode it armed in. */
 		if (getenv("PIKO_DYN_WRAM_BLOCKS")) dyn_exec_wram_blocks = 1;
+		{
+			const char *mn = getenv("PIKO_DYN_MIN_NATIVE");
+			if (mn && *mn) dyn_exec_min_native = (int)strtol(mn, NULL, 0);
+		}
 		dyn_exec_init();
 		dyn_exec_on = 1;
 	}

@@ -59,6 +59,7 @@
 #endif
 #ifdef PIKO_DYNAREC_EXEC
 #include "dynarec_exec.h"
+#include "dynarec_block.h"
 #endif
 #ifdef THREADCPU
 void S9xMainLoop (struct SRegisters * reg, struct SICPU * icpu, struct SCPUState * cpu)
@@ -152,6 +153,13 @@ void S9xMainLoop (void)
 		 * CPU through a whole straight-line run and updates cpu->PC; skip the
 		 * single-instruction dispatch. Event servicing (SA1/HBLANK below, and
 		 * the CPU.Flags/APU work above) then happens at block granularity. */
+		/*
+		 * Tried and reverted: gating this on "the previous instruction ended a
+		 * block" (dyn_try_block). It cut lookups from ~23M to ~5.7M with the
+		 * identical set of blocks still running, and measured SLOWER --
+		 * 40.91 -> 39.40 frames/s. Whatever the ~20% cost of arming EXEC is,
+		 * the per-dispatch cache lookup is not it. See README section 10.
+		 */
 		if (dyn_exec_on && dyn_exec_step (&Registers, &ICPU, &CPU))
 			goto piko_after_dispatch;
 #endif
@@ -185,7 +193,12 @@ void S9xMainLoop (void)
 			}
 		}
 #endif
+#ifdef PIKO_DYNAREC_EXEC
+		if (dyn_exec_on) dyn_interp_dispatches++;
 		(*ICPU.S9xOpcodes [*CPU.PC++].S9xOpcode) (&Registers, &ICPU, &CPU);
+#else
+		(*ICPU.S9xOpcodes [*CPU.PC++].S9xOpcode) (&Registers, &ICPU, &CPU);
+#endif
 #ifdef PIKO_DYNAREC_VERIFY
 		if (_vdo)
 			dyn_verify_after(_vop, &Registers, &ICPU, &CPU);
