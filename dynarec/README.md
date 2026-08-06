@@ -808,3 +808,58 @@ seconds by `objdump`, and it also invalidated the conclusion of one earlier
 experiment. When the question is "what is this code actually costing", read
 what the compiler emitted before designing another experiment around what you
 assume it emitted.
+
+## 14. Hypothesis 3 (I-cache) dies on arithmetic; the real target named
+
+No device run was needed. Sizes from the unstripped binary:
+
+```
+S9xMainLoop              800 B
+dyn_exec_step            472 B
+S9xDoHBlankProcessing   1140 B
+hot opcode handlers      12-180 B each (OpD0 180, Op10 180, Op18 24, ...)
+```
+
+The whole hot instruction working set is on the order of **5 KB**. The PXA270
+L1 instruction cache is **32 KB, 32-way set-associative**. At 32-way,
+conflict misses essentially do not happen, and 5 KB is nowhere near a capacity
+problem. Adding 472 bytes of dyn_exec_step to that cannot displace anything.
+Hypothesis 3 is dead, and it cost seconds instead of a build-deploy-measure
+cycle -- the same lesson as section 13, applied before the fact this time.
+
+### Re-bisecting after the inline filter
+
+| configuration | frames/s | |
+|---|---|---|
+| disarmed                        | 52.11 | |
+| armed, step returns immediately | 50.20 | filter + bare call: -3.7% |
+| armed, full lookup, zero blocks | 41.76 | **step's body: -16.8%** |
+| armed, blocks running           | 45.98 | blocks recover +10% |
+
+The body still costs ~17% even though the inline filter now turns away ~72% of
+dispatches before the call. So that 17% is concentrated in the ~28% that DO
+reach dyn_exec_step -- roughly 6M calls, not 22M -- which makes it about three
+times more expensive per call than it looked when the cost was spread over
+every dispatch.
+
+Note also that blocks now recover 10%, up from 8%: the same blocks are worth
+more once the overhead around them shrinks.
+
+### What the disassembly already says the target is
+
+```
+   6cf54:  push {r4, r5, r6, r7, r8, r9, sl, fp, lr}   <- 9 registers
+   6cf5c:  sub  sp, sp, #28                            <- 28-byte frame
+```
+
+dyn_exec_step is one function containing both a hot path (hash, probe, call the
+block) and a cold one (translate a new block, chain WRAM pages, flush the
+arena). GCC allocates the prologue for the union of the two, so **every** call
+pays a 9-register push/pop and a 28-byte frame to reach a path that needs
+neither -- 18 memory accesses before any work, ~6M times a run.
+
+The fix is the same shape as the one that just worked: split the cold path into
+its own `noinline` function so the hot path's frame is sized for the hot path.
+This is the next change, and it is worth measuring the prologue in the
+disassembly before AND after rather than trusting that the split had the
+intended effect -- exactly the mistake section 13 caught.
