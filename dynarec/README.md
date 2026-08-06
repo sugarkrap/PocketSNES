@@ -393,6 +393,36 @@ hardware. Two regimes:
   `dyn_pc_in_wram()`; a bank-only test silently lets those blocks into the
   cache.
 
+## 8b. First native-vs-fallback numbers (FF6, SL-C860, EXEC, 60s)
+
+    5,784,831 blocks run, 1,109 translated, 0 flushes
+    insns 6,656,188 native + 8,734,209 fallback = 15,390,397  (43% native)
+    9,349,118 dispatches skipped as WRAM (self-modifying)
+
+Translated set at the time: CLC/SEC/NOP/INX/INY/DEX/DEY + LDA abs.
+
+**The WRAM number is the headline, and it reorders the roadmap.** 9.35M
+dispatches were refused because the PC was in RAM, against 5.78M blocks
+actually run -- so roughly 62% of all dispatch attempts never reach the
+dynarec at all. FF6 executes more from WRAM than from ROM.
+
+More opcodes improves the 43% inside the ROM blocks we do run. Block linking
+improves dispatch for those same blocks. Neither touches the 62% we decline
+outright. Section 7 already said the translation cache must invalidate on
+writes and that it was "not an afterthought" -- that was a design opinion;
+this is a measurement, and it says WRAM support with write-invalidation is
+worth more than either of the other two.
+
+43% native from one memory opcode plus six trivial ones is also higher than
+expected, which suggests the remaining LDA/STA modes are worth having but are
+not where the order-of-magnitude sits.
+
+UNEXPLAINED, and it invalidates casual throughput comparisons: the block count
+comes out at ~5.78M for runs of 45s, 60s AND 90s. It should scale with wall
+time and does not, so something other than duration is bounding it. Do not
+trust blocks/sec figures (including the "128k vs 96k" noted when LDA landed)
+until this is understood.
+
 ## 9. Gates that cannot be combined, and other traps
 
 - **EXEC and PROFILE are mutually blind.** When a translated block runs,
