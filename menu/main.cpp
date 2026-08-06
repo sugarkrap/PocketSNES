@@ -23,8 +23,6 @@
 #endif
 #ifdef PIKO_DYNAREC_EXEC
 #include "dynarec_exec.h"
-#endif
-#ifdef PIKO_DYNAREC_WRAMSTAT
 #include "dynarec_wram.h"
 #endif
 
@@ -33,6 +31,28 @@
 
 /* PIKO_MAX_SECONDS deadline; 0 = run until told otherwise. See mainEntry. */
 static time_t piko_deadline = 0;
+
+/*
+ * Emulated frames and wall time, in EVERY build rather than under a dynarec
+ * gate, because this is the only throughput number that can be compared
+ * between the interpreter and any dynarec configuration.
+ *
+ * "Blocks run" is not a speed metric and was being read as one: turning on
+ * WRAM block translation tripled the block count (5.8M -> 17.5M) while
+ * throughput FELL by 24% (41.81 -> 31.63 frames/s). WRAM blocks are shorter,
+ * so more of them is what a slowdown looks like too.
+ */
+static unsigned long piko_frames = 0;
+static time_t        piko_start  = 0;
+
+static void piko_report_frames(void)
+{
+	long secs = (long)(time(NULL) - piko_start);
+	if (secs <= 0) secs = 1;
+	fprintf(stderr, "PIKO: %lu emulated frames in %lds = %lu.%02lu frames/s\n",
+	        piko_frames, secs, piko_frames / (unsigned long)secs,
+	        ((piko_frames % (unsigned long)secs) * 100) / (unsigned long)secs);
+}
 
 static struct MENU_OPTIONS mMenuOptions;
 static int mEmuScreenHeight;
@@ -445,6 +465,7 @@ int Run(int sound)
 
 				//Run SNES for one glorious frame
 				S9xMainLoop ();
+				piko_frames++;
 #ifdef PIKO_DYNAREC_WRAMSTAT
 				/* Per-frame, because "code pages dirtied per frame" is the
 				 * cost of invalidation, and it is only meaningful if the
@@ -458,6 +479,7 @@ int Run(int sound)
 				 * process on a device whose busybox has no kill. */
 				if (piko_deadline && time(NULL) >= piko_deadline) {
 					fprintf(stderr, "PIKO_MAX_SECONDS reached, exiting\n");
+				piko_report_frames();
 #ifdef PIKO_DYNAREC_EXEC
 					if (dyn_exec_on) dyn_exec_report();
 #endif
@@ -495,6 +517,7 @@ int Run(int sound)
 			 * that the process goes away by itself.
 			 */
 			fprintf(stderr, "PIKO_MAX_SECONDS reached, exiting\n");
+				piko_report_frames();
 #ifdef PIKO_DYNAREC_EXEC
 			if (dyn_exec_on) dyn_exec_report();
 #endif
@@ -744,6 +767,7 @@ int mainEntry(int argc, char* argv[])
 	 * opcode count that happened to change. Say which build this is, always.
 	 */
 	fprintf(stderr, "PIKO build %s %s\n", __DATE__, __TIME__);
+	piko_start = time(NULL);
 	{
 		const char *ms = getenv("PIKO_MAX_SECONDS");
 		if (ms && *ms)
@@ -770,6 +794,8 @@ int mainEntry(int argc, char* argv[])
 #ifdef PIKO_DYNAREC_EXEC
 	/* EXEC build: PIKO_DYN_EXEC=1 lets translated blocks drive the CPU. */
 	if (getenv("PIKO_DYN_EXEC")) {
+		/* Before dyn_exec_init: it prints which mode it armed in. */
+		if (getenv("PIKO_DYN_WRAM_BLOCKS")) dyn_exec_wram_blocks = 1;
 		dyn_exec_init();
 		dyn_exec_on = 1;
 	}
@@ -784,6 +810,10 @@ int mainEntry(int argc, char* argv[])
 		dyn_exec_on = 1;
 		dyn_wram_init();
 		dyn_wram_on = 1;
+		/* The measurement counts writes onto code pages even when WRAM blocks
+		 * are not being cached -- that is the whole point of it -- so the write
+		 * hook has to be live regardless of dyn_exec_wram_blocks. */
+		dyn_wram_tracking = 1;
 	}
 #endif
 

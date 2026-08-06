@@ -262,7 +262,7 @@ END_EXTERN_C
 
 #include "gfx.h"
 #include "memmap.h"
-#ifdef PIKO_DYNAREC_WRAMSTAT
+#ifdef PIKO_DYNAREC_EXEC
 #include "dynarec_wram.h"
 #endif
 
@@ -545,11 +545,11 @@ STATIC INLINE void REGISTER_2122(uint8 Byte,
 STATIC INLINE void REGISTER_2180(uint8 Byte,
 		CMemory * mem, struct InternalPPU * ippu, struct SPPU * ppu)
 {
-#ifdef PIKO_DYNAREC_WRAMSTAT
+#ifdef PIKO_DYNAREC_EXEC
     /* The $2180 port is the ONLY way DMA reaches WRAM -- dma.cpp calls this
      * macro directly, never S9xSetByte. A write hook on the byte path alone
      * would report a confident zero for regions DMA is actively filling. */
-    if (dyn_wram_on) dyn_wram_write_off(ppu->WRAM, 1);
+    if (dyn_wram_tracking) dyn_wram_touch(ppu->WRAM, 1);
 #endif
     mem->RAM[ppu->WRAM++] = Byte;
     ppu->WRAM &= 0x1FFFF;

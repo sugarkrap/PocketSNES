@@ -51,6 +51,10 @@
 #include "srtc.h"
 #include "sdd1.h"
 
+#ifdef PIKO_DYNAREC_EXEC
+#include "dynarec_wram.h"
+#endif
+
 #ifndef ZSNES_FX
 #include "fxemu.h"
 
@@ -135,6 +139,12 @@ void S9xReset (void)
     ZeroMemory (Memory.FillRAM, 0x8000);
     memset (Memory.VRAM, 0x00, 0x10000);
     memset (Memory.RAM, 0x55, 0x20000);
+#ifdef PIKO_DYNAREC_EXEC
+    /* Every byte of WRAM just changed, and none of it came through the write
+     * path the block cache watches. Anything cached from WRAM is now a
+     * snapshot of bytes that no longer exist. */
+    dyn_wram_flush_all ();
+#endif
 
     S9xResetCPU ();
     S9xResetPPU ();

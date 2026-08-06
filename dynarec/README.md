@@ -494,12 +494,72 @@ reported a confident zero for a region DMA was actively filling. Miss either
 hook and the cache goes stale silently, in the direction that looks like good
 news.
 
-**Verification will be behavioural, not VERIFY.** VERIFY diffs single opcodes
-and cannot see a stale block: the failure is not a wrong opcode, it is a block
-that should have been discarded and was not. The evidence is FF6 surviving
-with WRAM translation on -- its $001500 trampoline is rewritten every frame,
-so a stale cache breaks it immediately -- plus a translated count that climbs
-well past 1,109 and then stabilises.
+**Verification is behavioural, not VERIFY.** VERIFY diffs single opcodes and
+cannot see a stale block: the failure is not a wrong opcode, it is a block
+that should have been discarded and was not.
+
+## 8d. It was built, it works, and it is off by default
+
+The invalidation is implemented and correct. FF6 ran 90 seconds with its
+$001500 trampoline being rewritten underneath a cached block, ~21
+invalidations a second, no corruption, X restored cleanly. The predicted cost
+held: 1,896 invalidations in 1,896 events, i.e. every event discarded exactly
+one block, exactly as "the lists are one entry long" predicted.
+
+It is still **off by default**, because it makes the emulator slower.
+
+### The measurement that says so, and the one that nearly hid it
+
+`blocks run` is not a speed metric, and it was being read as one. Enabling
+WRAM blocks TRIPLED it -- which looks like a triumph and is not:
+
+| configuration | blocks run | native | **frames/s** |
+|---|---|---|---|
+| interpreter (no dynarec compiled) | -- | -- | **51.66** |
+| EXEC binary, dynarec disarmed | -- | -- | **50.57** |
+| EXEC, ROM blocks only | 5,785,909 | 43% | **41.15** |
+| EXEC, ROM + WRAM blocks | 17,522,850 | 20% | **31.63** |
+
+Same binary and same boot for the last two, one environment variable apart.
+Three times the blocks for three quarters of the speed. WRAM code hits almost
+nothing the translator does natively (43% -> 20%), so each of those blocks is
+a prologue and an epilogue wrapped around a chain of interpreter calls --
+strictly more work than letting the interpreter dispatch it directly.
+
+That is why menu/main.cpp now counts emulated frames in EVERY build, outside
+any dynarec gate: it is the only figure comparable between the interpreter and
+a dynarec configuration.
+
+### The larger finding
+
+Read the first and third rows together. **The dynarec is currently ~20% slower
+than the interpreter it exists to accelerate**, before WRAM blocks enter into
+it. 43% of instructions going native is not enough to pay for the block
+prologue/epilogue plus a call per fallback instruction.
+
+So the bottleneck is not block plumbing, and adding more of it makes things
+worse. What would change the picture is native coverage of the opcodes that
+actually run, and block linking to stop paying prologue/epilogue per block.
+WRAM blocks become worth switching on at the point where those land -- the
+machinery is ready and inert until then (PIKO_DYN_WRAM_BLOCKS=1).
+
+### Noise, and what not to conclude
+
+Three runs of the *same* armed configuration gave 41.81 / 40.87 / 41.15 --
+about 2% spread. The interpreter-vs-dynarec gap (51.66 vs ~41) and the WRAM
+gap (~41 vs 31.63) are far outside that and are real. The ~1 frame/s between
+"no hook compiled" and "hook compiled but inert" is NOT: it is inside the
+spread, and no claim rests on it.
+
+### One limitation, stated rather than papered over
+
+Invalidation is at block granularity, checked when the write happens. A block
+that writes into its own page and then keeps executing modified bytes *within
+the same block* will run the stale snapshot to the end of that block; the
+interpreter, which re-fetches every opcode, would not. Bailing out mid-block
+is expensive and no game seen here needs it -- FF6's trampoline is rewritten
+by other code, not by the block living there -- but it is a real difference
+from interpreter semantics rather than an oversight.
 
 ## 9. Gates that cannot be combined, and other traps
 

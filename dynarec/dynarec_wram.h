@@ -83,12 +83,66 @@ static __inline int dyn_wram_offset_of(uint32_t addr, uint32_t *off)
 	return 0;
 }
 
+/* ---- write-invalidation (EXEC builds) --------------------------------- *
+ *
+ * The measurement above said per-page, not global flush: 0.72 dirty code
+ * pages per frame against ~1,100 cached blocks, so a flush per event would
+ * cost three orders of magnitude more than it saves. See README 8c.
+ *
+ * dyn_code_page[p] is nonzero if any cached block was translated from page p.
+ * It is the whole fast path: almost every WRAM write finds a zero here and
+ * costs one byte load. It is deliberately never cleared on invalidation --
+ * a stale 1 only buys a walk of some empty lists, and the block is usually
+ * re-translated into the same page moments later anyway.
+ */
+extern uint8_t dyn_code_page[DYN_WRAM_PAGES];
+
+/*
+ * Nonzero only while WRAM blocks are actually being cached, so a build with
+ * the feature off pays one global load per write rather than the address
+ * decode below.
+ *
+ * Do not read a number into this. The disarmed EXEC binary measured 50.25
+ * frames/s before this early-out and 50.57 after, against 51.66 for a build
+ * with no hook compiled at all -- but three runs of the SAME armed config came
+ * out 41.81 / 40.87 / 41.15, so run-to-run spread here is ~2%. The early-out
+ * is right on principle and its effect is inside the noise; the honest claim
+ * is that the hook is not measurably expensive either way, not that it cost
+ * 2.7% and was fixed.
+ */
+extern int dyn_wram_tracking;
+
+/* Discard every cached block built from `page`. Out of line in
+ * dynarec_exec.cpp, which owns the cache. */
+void dyn_wram_invalidate_page(unsigned page);
+
+/* Discard the entire cache. For the bulk rewrites that do not come through
+ * the byte path at all: reset (memsets WRAM) and savestate load (reads 128K
+ * straight over it). Neither is a write in the sense the hook understands,
+ * and both change every byte of code in WRAM. */
+void dyn_wram_flush_all(void);
+
+/* `off` is already a WRAM offset: the $2180 port path has one directly. */
+static __inline void dyn_wram_touch(uint32_t off, unsigned n)
+{
+	uint32_t first, last;
+
+#ifdef PIKO_DYNAREC_WRAMSTAT
+	if (dyn_wram_on) dyn_wram_write_off(off, n);
+#endif
+	first = off >> DYN_WRAM_PAGE_SHIFT;
+	last  = (off + n - 1) >> DYN_WRAM_PAGE_SHIFT;   /* a word can straddle */
+	if (dyn_code_page[first]) dyn_wram_invalidate_page(first);
+	if (last != first && last < DYN_WRAM_PAGES && dyn_code_page[last])
+		dyn_wram_invalidate_page(last);
+}
+
 static __inline void dyn_wram_write(uint32_t addr, unsigned n)
 {
 	uint32_t off;
-	if (!dyn_wram_on) return;
+	if (!dyn_wram_tracking) return;
 	if (!dyn_wram_offset_of(addr, &off)) return;
-	dyn_wram_write_off(off, n);
+	dyn_wram_touch(off, n);
 }
 
 #ifdef __cplusplus

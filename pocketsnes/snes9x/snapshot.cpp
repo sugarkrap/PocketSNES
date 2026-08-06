@@ -74,6 +74,9 @@ END_EXTERN_C
 
 // notaz: file i/o function pointers for states,
 #include <savestateio.h>
+#ifdef PIKO_DYNAREC_EXEC
+#include "dynarec_wram.h"
+#endif
 
 bool8_32 S9xUnfreezeZSNES (const char *filename);
 
@@ -581,6 +584,12 @@ static int Unfreeze ()
 	return (result);
     if ((result = UnfreezeBlock ("RAM", Memory.RAM, 0x20000)) != SUCCESS)
 	return (result);
+#ifdef PIKO_DYNAREC_EXEC
+    /* 128K read straight over WRAM, not one byte of it through the write path
+     * the block cache watches. Quick-load is bound to L+R+Right in the menu,
+     * so this is reachable in ordinary play, not just in tests. */
+    dyn_wram_flush_all ();
+#endif
     if ((result = UnfreezeBlock ("SRA", ::SRAM, 0x20000)) != SUCCESS)
 	return (result);
     if ((result = UnfreezeBlock ("FIL", Memory.FillRAM, 0x8000)) != SUCCESS)
@@ -1108,6 +1117,9 @@ bool8_32 S9xUnfreezeZSNES (const char *filename)
 	// vraminctype ...
 
 	fread (Memory.RAM, 1, 128 * 1024, fs);
+#ifdef PIKO_DYNAREC_EXEC
+	dyn_wram_flush_all ();      /* same as UnfreezeBlock above: bulk rewrite */
+#endif
 	fread (Memory.VRAM, 1, 64 * 1024, fs);
 
 	if (Settings.APUEnabled)
