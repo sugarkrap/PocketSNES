@@ -45,7 +45,7 @@ static size_t   code_cap, code_used;
 
 /* block cache: (guest_pc<<2 | mode) -> native entry. Open addressing.
  *
- * exec_valid is tri-state, and it has to be. Linear probing stops at the first
+ * dyn_exec_valid is tri-state, and it has to be. Linear probing stops at the first
  * EMPTY slot, so clearing a slot on invalidation would cut the probe chain and
  * hide every key that had collided past it -- they would simply stop being
  * found, the blocks would be re-translated forever, and nothing would look
@@ -63,14 +63,15 @@ static size_t   code_cap, code_used;
 #define EXEC_EMPTY 0
 #define EXEC_LIVE  1
 #define EXEC_TOMB  2
-static uint32_t  exec_key[EXEC_SLOTS];
-static void     *exec_ptr[EXEC_SLOTS];
-static int       exec_valid[EXEC_SLOTS];
+uint32_t  dyn_exec_key[EXEC_SLOTS];
+void     *dyn_exec_ptr[EXEC_SLOTS];
+int       dyn_exec_valid[EXEC_SLOTS];
 static uint16_t  exec_nat[EXEC_SLOTS];    /* native insns in this block   */
 static uint16_t  exec_fb[EXEC_SLOTS];     /* fallback insns in this block */
 static unsigned long e_insn_nat, e_insn_fb, e_wram_skip;
 
-static unsigned long e_blocks, e_translated, e_flushes;
+unsigned long dyn_exec_blocks;   /* shared with cpuexec.cpp's inline fast path */
+static unsigned long e_translated, e_flushes;
 static unsigned long e_wram_blocks, e_inval_calls, e_inval_blocks, e_wram_full;
 static unsigned long e_declined_hits;
 
@@ -118,21 +119,21 @@ int dyn_exec_wram_blocks = 0;
 /*
  * Slots actually in use. The arrays stay statically sized; this only limits
  * which entries get TOUCHED, which is the point -- cache pressure is about the
- * working set, not the allocation. exec_key/exec_ptr/exec_valid are 64 KB each,
+ * working set, not the allocation. dyn_exec_key/dyn_exec_ptr/dyn_exec_valid are 64 KB each,
  * 192 KB probed by a hash, against 32 KB of L1 data cache on the PXA270. If
  * that is where the ~20% of arming EXEC goes, shrinking this must recover it;
  * if it does not, the hypothesis is dead. PIKO_DYN_SLOTS sets it.
  */
 int dyn_exec_slots = EXEC_SLOTS;
 int dyn_exec_stub = 0;
-static uint32_t exec_mask = EXEC_MASK;
+uint32_t dyn_exec_mask = EXEC_MASK;
 
-static inline uint32_t exec_hash(uint32_t k) { return (k * 2654435761u) & exec_mask; }
+static inline uint32_t exec_hash(uint32_t k) { return (k * 2654435761u) & dyn_exec_mask; }
 
 static void exec_reset_cache(void)
 {
 	unsigned i;
-	memset(exec_valid, 0, sizeof(exec_valid));
+	memset(dyn_exec_valid, 0, sizeof(dyn_exec_valid));
 	memset(dyn_code_page, 0, sizeof(dyn_code_page));
 	for (i = 0; i < DYN_WRAM_PAGES; i++) wram_head[i] = -1;
 	for (i = 0; i < EXEC_SLOTS; i++) wram_pg_first[i] = WRAM_UNCHAINED;
@@ -181,7 +182,7 @@ extern "C" void dyn_wram_invalidate_page(unsigned page)
 		while (s >= 0) {
 			int16_t nx = wram_next[s];
 			if (wram_pg_first[s] <= page && wram_pg_last[s] >= page) {
-				exec_valid[s] = EXEC_TOMB;
+				dyn_exec_valid[s] = EXEC_TOMB;
 				wram_unlink((unsigned)s);
 				e_inval_blocks++;
 				hit = 1;
@@ -219,11 +220,11 @@ void dyn_exec_init(void)
 	if (dyn_exec_slots > EXEC_SLOTS) dyn_exec_slots = EXEC_SLOTS;
 	/* round down to a power of two: the hash masks, it does not modulo */
 	while (dyn_exec_slots & (dyn_exec_slots - 1)) dyn_exec_slots &= dyn_exec_slots - 1;
-	exec_mask = (uint32_t)dyn_exec_slots - 1;
+	dyn_exec_mask = (uint32_t)dyn_exec_slots - 1;
 	exec_reset_cache();
 	/* Only make the write path pay for tracking if something will use it. */
 	dyn_wram_tracking = dyn_exec_wram_blocks;
-	e_blocks = e_translated = e_flushes = 0;
+	dyn_exec_blocks = e_translated = e_flushes = 0;
 	e_insn_nat = e_insn_fb = e_wram_skip = 0;
 	e_wram_blocks = e_inval_calls = e_inval_blocks = e_wram_full = 0;
 	e_declined_hits = 0;
@@ -242,11 +243,11 @@ static void *exec_find(uint32_t key, unsigned *slot)
 	uint32_t h = exec_hash(key);
 	unsigned p;
 	for (p = 0; p < (unsigned)dyn_exec_slots; p++) {
-		unsigned i = (h + p) & exec_mask;
-		if (exec_valid[i] == EXEC_EMPTY) return 0;   /* tombstones do NOT stop us */
-		if (exec_valid[i] == EXEC_LIVE && exec_key[i] == key) {
+		unsigned i = (h + p) & dyn_exec_mask;
+		if (dyn_exec_valid[i] == EXEC_EMPTY) return 0;   /* tombstones do NOT stop us */
+		if (dyn_exec_valid[i] == EXEC_LIVE && dyn_exec_key[i] == key) {
 			*slot = i;
-			return exec_ptr[i];
+			return dyn_exec_ptr[i];
 		}
 	}
 	return 0;
@@ -257,9 +258,9 @@ static unsigned exec_slot_of(uint32_t key)
 	uint32_t h = exec_hash(key);
 	unsigned p;
 	for (p = 0; p < (unsigned)dyn_exec_slots; p++) {
-		unsigned i = (h + p) & exec_mask;
-		if (exec_valid[i] == EXEC_EMPTY) break;
-		if (exec_valid[i] == EXEC_LIVE && exec_key[i] == key) return i;
+		unsigned i = (h + p) & dyn_exec_mask;
+		if (dyn_exec_valid[i] == EXEC_EMPTY) break;
+		if (dyn_exec_valid[i] == EXEC_LIVE && dyn_exec_key[i] == key) return i;
 	}
 	return EXEC_SLOTS;   /* not found */
 }
@@ -271,22 +272,22 @@ static unsigned exec_insert(uint32_t key, void *entry)
 	unsigned p, tomb = EXEC_SLOTS;
 
 	for (p = 0; p < (unsigned)dyn_exec_slots; p++) {
-		unsigned i = (h + p) & exec_mask;
-		if (exec_valid[i] == EXEC_TOMB) {
+		unsigned i = (h + p) & dyn_exec_mask;
+		if (dyn_exec_valid[i] == EXEC_TOMB) {
 			/* remember the first reusable slot, but keep probing: the key may
 			 * already be live further along the chain */
 			if (tomb == EXEC_SLOTS) tomb = i;
 			continue;
 		}
-		if (exec_valid[i] == EXEC_EMPTY) {
+		if (dyn_exec_valid[i] == EXEC_EMPTY) {
 			if (tomb != EXEC_SLOTS) i = tomb;
-			exec_key[i] = key; exec_ptr[i] = entry; exec_valid[i] = EXEC_LIVE;
+			dyn_exec_key[i] = key; dyn_exec_ptr[i] = entry; dyn_exec_valid[i] = EXEC_LIVE;
 			exec_nat[i] = (uint16_t)dyn_tr_native;
 			exec_fb[i]  = (uint16_t)dyn_tr_fallback;
 			return i;
 		}
-		if (exec_key[i] == key) {
-			exec_ptr[i] = entry;
+		if (dyn_exec_key[i] == key) {
+			dyn_exec_ptr[i] = entry;
 			exec_nat[i] = (uint16_t)dyn_tr_native;
 			exec_fb[i]  = (uint16_t)dyn_tr_fallback;
 			return i;
@@ -371,7 +372,7 @@ void dyn_exec_report(void)
 {
 	unsigned long tot = e_insn_nat + e_insn_fb;
 	fprintf(stderr, "DYN-EXEC: FINAL %lu blocks run, %lu translated, %lu flushes%s\n",
-	        e_blocks, e_translated, e_flushes,
+	        dyn_exec_blocks, e_translated, e_flushes,
 #ifdef PIKO_DYN_NOCOUNT
 	        "  [NOCOUNT build: other counters below read 0 because they are"
 	        " compiled out, not because nothing happened]"
@@ -488,7 +489,7 @@ int dyn_exec_step(struct SRegisters *reg, struct SICPU *icpu, struct SCPUState *
 	 * The native/fallback split costs two loads from 32 KB arrays plus two
 	 * global read-modify-writes on EVERY block run, and measured 4.5% of the
 	 * block path (43.23 -> 45.16 frames/s with it out). It is a diagnostic, so
-	 * it is off unless asked for: `make BLOCKSTATS=1`. e_blocks stays, because
+	 * it is off unless asked for: `make BLOCKSTATS=1`. dyn_exec_blocks stays, because
 	 * the FINAL line is how a run is known to have done anything at all.
 	 */
 #ifdef PIKO_DYN_BLOCKSTATS
@@ -499,8 +500,8 @@ int dyn_exec_step(struct SRegisters *reg, struct SICPU *icpu, struct SCPUState *
 #else
 	(void)slot;
 #endif
-	if (((++e_blocks) % 4000000UL) == 0)
+	if (((++dyn_exec_blocks) % 4000000UL) == 0)
 		fprintf(stderr, "DYN-EXEC: %lu blocks run, %lu translated, %lu flushes\n",
-		        e_blocks, e_translated, e_flushes);
+		        dyn_exec_blocks, e_translated, e_flushes);
 	return 1;
 }

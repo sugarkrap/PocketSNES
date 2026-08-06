@@ -19,6 +19,8 @@
 #ifndef PIKO_DYNAREC_EXEC_H
 #define PIKO_DYNAREC_EXEC_H
 
+#include <stdint.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -45,6 +47,29 @@ struct SCPUState;
 #else
 #define DYN_COUNT(stmt) do { stmt; } while (0)
 #endif
+
+/*
+ * The block cache, exposed so cpuexec.cpp can resolve the COMMON case without
+ * a call. dyn_exec_step's prologue is nine callee-saved registers and a
+ * 28-byte frame -- inherent to its hot path, not removable by splitting the
+ * translator out (tried; the frame grew to 36) -- so the only way to stop
+ * paying it is to stop calling it for the case that hits.
+ *
+ * The inline probe examines ONE slot. At ~12% load factor that resolves nearly
+ * every hit; a collision, a tombstone or an empty slot falls through to
+ * dyn_exec_step, which does the full linear probe and any translation. This is
+ * a fast path, never a second implementation of the lookup: the table's
+ * invariants stay owned by dynarec_exec.cpp, and anything the fast path does
+ * not immediately recognise is handed back to it.
+ */
+#define DYN_EXEC_SLOTS    16384
+#define DYN_EXEC_LIVE     1
+#define DYN_EXEC_DECLINED ((void *)1)
+extern uint32_t      dyn_exec_key[DYN_EXEC_SLOTS];
+extern void         *dyn_exec_ptr[DYN_EXEC_SLOTS];
+extern int           dyn_exec_valid[DYN_EXEC_SLOTS];
+extern uint32_t      dyn_exec_mask;
+extern unsigned long dyn_exec_blocks;
 
 extern int dyn_exec_on;
 

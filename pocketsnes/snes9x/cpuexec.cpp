@@ -101,6 +101,47 @@ int piko_block_possible (void)
 }
 #endif
 
+#ifdef PIKO_DYNAREC_EXEC
+/*
+ * Inline block dispatch: hash, probe ONE slot, jump to the block.
+ *
+ * Everything this does not immediately recognise -- a collision, a tombstone,
+ * an empty slot -- is handed to dyn_exec_step, which owns the table and does
+ * the full linear probe plus translation. So this cannot disagree with the
+ * cache; it can only be less patient than it.
+ *
+ * Why: dyn_exec_step costs a nine-register push/pop and a 28-byte frame on
+ * every call, before any work. Splitting its cold path out did not shrink that
+ * (the frame grew), because the hot path itself keeps nine values live across
+ * the call into the block. The remaining move is to not make the call.
+ */
+static __inline__ __attribute__((always_inline))
+int piko_exec_fast (void)
+{
+	uint32 pc, key, h;
+	void *p;
+
+	if (!piko_block_possible ())
+		return 0;
+
+	pc  = ((uint32) Registers.PB << 16) | (uint16) (CPU.PC - CPU.PCBase);
+	key = (pc << 2) | (uint32) (((Registers.P.W & MemoryFlag) ? 2 : 0)
+	                          | ((Registers.P.W & IndexFlag)  ? 1 : 0));
+	h   = (key * 2654435761u) & dyn_exec_mask;
+
+	if (dyn_exec_valid [h] == DYN_EXEC_LIVE && dyn_exec_key [h] == key) {
+		p = dyn_exec_ptr [h];
+		if (p == DYN_EXEC_DECLINED)
+			return 0;         /* known not worth translating; interpret it */
+		dyn_exec_blocks++;
+		((void (*) (struct SRegisters *, struct SICPU *, struct SCPUState *)) p)
+			(&Registers, &ICPU, &CPU);
+		return 1;
+	}
+	return dyn_exec_step (&Registers, &ICPU, &CPU);
+}
+#endif
+
 void S9xMainLoop (void)
 {
 	struct SICPU		* icpu  = &ICPU;
@@ -196,8 +237,7 @@ void S9xMainLoop (void)
 		 * 40.91 -> 39.40 frames/s. Whatever the ~20% cost of arming EXEC is,
 		 * the per-dispatch cache lookup is not it. See README section 10.
 		 */
-		if (dyn_exec_on && piko_block_possible ()
-		    && dyn_exec_step (&Registers, &ICPU, &CPU))
+		if (dyn_exec_on && piko_exec_fast ())
 			goto piko_after_dispatch;
 #endif
 #ifdef CPU_SHUTDOWN

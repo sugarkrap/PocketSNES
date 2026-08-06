@@ -899,3 +899,52 @@ verify it properly.
 Current standing: **45.98-46.78 frames/s armed against ~52 disarmed**, from
 43.23 against 51.11 when this investigation started. Overhead ~15% -> ~10%,
 with the identical 5,698,515 blocks running throughout.
+
+## 15. Inlining the cache probe: 46.78 -> 47.78
+
+The endpoint of section 14. If dyn_exec_step's nine-register prologue cannot
+shrink, stop calling it for the case that hits.
+
+`piko_exec_fast()` in cpuexec.cpp hashes the key and probes **one** slot. On a
+live exact match it jumps straight into the block; on the DECLINED sentinel it
+returns and lets the interpreter dispatch. Anything else -- a collision, a
+tombstone, an empty slot -- is handed to dyn_exec_step, which owns the table
+and does the full linear probe plus any translation.
+
+That containment is the design, not an optimisation detail: the fast path is
+never a second implementation of the lookup, only a less patient one. It can
+be wrong about *whether it knows the answer*; it cannot be wrong about the
+answer. At ~12% load factor a single probe resolves nearly every hit.
+
+Checked in the disassembly before measuring, because two changes this session
+silently failed to take effect:
+
+```
+calls to piko_exec_fast:                    0     (inlined)
+calls to dyn_exec_step inside S9xMainLoop:  1     (the miss path)
+   1a3ac:  mul r2, r6, r3                         (the hash, now in the loop)
+```
+
+### The whole investigation
+
+| step | frames/s | overhead vs disarmed |
+|---|---|---|
+| start                                   | 43.23 | ~15.4% |
+| per-block stats opt-in (section 12)     | 44.63 | ~13.4% |
+| inline WRAM filter (section 13)         | 46.78 | ~9.5% |
+| **inline cache probe**                  | **47.78** | **~7.2%** |
+
+**5,698,515 blocks run at every step, unchanged.** Not one of these made the
+dynarec translate better code or run more of it; they removed the machinery
+around a fixed amount of work. That the block count never moved is also the
+correctness argument -- an inline probe that disagreed with the real one would
+show up immediately as a different number of blocks executed.
+
+### What is left
+
+~7.2%, of which the bare-call component was last measured at 3.7% and is now
+mostly gone. The rest is the block prologue/epilogue, the per-instruction
+MemSpeed accounting (~7 memory operations each, section 10), and the fallback
+calling convention. Those are costs *inside* the generated code rather than
+around it -- which is where this should have wanted to go all along, and now
+can, because the surrounding overhead is no longer large enough to hide it.
