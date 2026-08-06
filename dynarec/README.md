@@ -278,8 +278,23 @@ default until it's proven; the shipped binary stays the known-good interpreter.
         S9xGetByte calls, because the word straddles a Map block edge at the
         top of the WRAM mirror. The fast path must bail to the interpreter for
         that address rather than assume one block covers both bytes.
-      - add each new opcode to dyn_verify_translatable() as it lands, so the
-        run-both-and-diff net actually covers it. VERIFY on hardware is cheap
+      - **VERIFY must be extended FIRST -- it cannot cover these opcodes as
+        written.** dyn_verify_init() builds one stub per opcode from a 1-byte
+        array (`uint8_t op[1] = { want[i] }`). Translating LDA abs against
+        that reads code[off+1..2], past the end of the array; and since the
+        design bakes the operand in as an immediate, a single per-opcode stub
+        cannot stand for an instruction whose address differs at every site.
+        The existing "53,908 checks, 0 diverged" result therefore covers only
+        the seven operand-less opcodes.
+
+        The fix is to translate the ACTUAL instruction at the live PC into a
+        scratch buffer in dyn_verify_before(), rather than looking up a
+        prebuilt stub: the bytes are right there at cpu->PC, the mode is
+        known, and the harness already runs the result against a scratch CPU
+        copy. Slower per instruction, but VERIFY is a debug gate and 60s on
+        the board is plenty. Do this before adding a single operand-bearing
+        opcode -- every opcode landed so far was landed with the net under it,
+        and that is why they are trusted. VERIFY on hardware is cheap
         (53,908 checks in 60s) and is what proved the existing opcode set
         correct on a real PXA270.
 
