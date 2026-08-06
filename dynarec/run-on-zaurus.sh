@@ -113,8 +113,25 @@ make -f Makefile.zaurus clean >/dev/null
 make -f Makefile.zaurus $BUILDFLAG PIKO_DIR="$PIKO" >/dev/null
 echo "   $(ls -l PocketSNES | awk '{print $5}') bytes"
 
+# The board drops off WiFi mid-transfer often enough that three runs in a row
+# were once diagnosed against a stale binary -- scp failed, the run proceeded
+# on whatever was already there, and the numbers looked plausible. Wait for it
+# to answer, retry the copy, and check the size landed.
 echo "== copying to $TARGET:$DEV_BIN"
-$SCP -O PocketSNES "$TARGET:$DEV_BIN"
+copied=0
+for attempt in 1 2 3 4 5; do
+	for probe in 1 2 3 4 5 6 7 8 9 10; do
+		$SSH -o ConnectTimeout=5 "$TARGET" true 2>/dev/null && break
+		sleep 4
+	done
+	if $SCP -O PocketSNES "$TARGET:$DEV_BIN" 2>/dev/null; then copied=1; break; fi
+	echo "   attempt $attempt failed (device unreachable?), retrying"
+	sleep 5
+done
+[ "$copied" = 1 ] || { echo "could not copy the binary to $TARGET" >&2; exit 1; }
+want=$(ls -l PocketSNES | awk '{print $5}')
+got=$($SSH "$TARGET" "ls -l $DEV_BIN" 2>/dev/null | awk '{print $3}')
+[ "$want" = "$got" ] || echo "   WARNING: size mismatch (local $want, device $got)"
 $SSH "$TARGET" "chmod +x $DEV_BIN"
 # The ROM is large and rarely changes, so only send it when it is missing.
 if ! $SSH "$TARGET" "test -f $DEV_ROM"; then
@@ -156,5 +173,7 @@ done
 
 echo
 echo "== summary"
-grep -E "DYN-(EXEC|VERIFY|PROFILE)|diverged|exited rc" "zaurus-${MODE}.log" | tail -12
+# The build stamp is first: without it the run used a stale binary and nothing
+# below it means anything.
+grep -E "PIKO build|DYN-(EXEC|VERIFY|PROFILE)|diverged|MAX_SECONDS" "zaurus-${MODE}.log" | tail -12
 echo "   full output in zaurus-${MODE}.log"
