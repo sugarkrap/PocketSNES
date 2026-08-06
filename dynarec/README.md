@@ -755,3 +755,56 @@ Still outstanding, and still in this order:
 Six hypotheses tested so far, one and a half right. The ablation knobs
 (PIKO_DYN_STUB / _SLOTS / _MIN_NATIVE, make NOCOUNT / BLOCKSTATS) are what
 makes being wrong cheap, and they are worth more than any single answer.
+
+## 13. Hypothesis 2: read the disassembly first
+
+Before another device cycle, the generated code for dyn_exec_step was actually
+read. Two facts, neither guessable:
+
+```
+0006cf54 <dyn_exec_step>:
+   6cf54:  push {r4, r5, r6, r7, r8, r9, sl, fp, lr}   <- NINE registers
+   6cf5c:  sub  sp, sp, #28                            <- every call
+   ...
+   6cfc8:  bl   6c7f0 <dyn_wram_offset_of>             <- NOT inlined
+```
+
+**dyn_exec_step pushes nine callee-saved registers and a 28-byte frame before
+it looks at anything.** The PIKO_DYN_STUB probe returns *after* that push, so
+the bisection's "4.6% call / 17% body" split was really "4.6% call+prologue /
+17% the rest" -- the prologue was on both sides of the line.
+
+**dyn_wram_offset_of was never inlined.** `static __inline` at -Os is a hint
+GCC declined, and the out-param forced the result through memory plus a caller
+stack slot. The earlier commit that "inlined the WRAM test" therefore changed
+nothing, measured flat, and was very nearly filed as another disproved
+hypothesis. It was not disproved; it was never performed.
+
+### The fix
+
+Reject at the dispatch site, inline, before any call happens. With WRAM blocks
+off, ~72% of dispatches are in WRAM and were paying a call, a nine-register
+prologue, and a second out-of-line call only to be thrown away.
+`piko_block_possible()` in cpuexec.cpp is `always_inline` -- not a hint, because
+a hint is exactly what failed last time -- and the build checks that zero calls
+to it were emitted.
+
+It is only a FILTER; dyn_exec_step still re-checks. A false yes wastes a call.
+A false no would silently stop translating a region, so it mirrors
+dyn_wram_offset_of's mirror handling exactly rather than approximating it.
+
+| | frames/s | overhead vs disarmed |
+|---|---|---|
+| start of this investigation | 43.23 | ~15% |
+| per-block stats opt-in (section 12) | 44.63 | ~13% |
+| inline dispatch filter | **46.78** | **~9.5%** |
+
+Identical 5,698,515 blocks run throughout: this is the same work, done with
+less around it.
+
+**The lesson worth keeping.** Five hypotheses were tested by rebuilding and
+re-measuring on hardware, at several minutes each. The sixth was answered in
+seconds by `objdump`, and it also invalidated the conclusion of one earlier
+experiment. When the question is "what is this code actually costing", read
+what the compiler emitted before designing another experiment around what you
+assume it emitted.

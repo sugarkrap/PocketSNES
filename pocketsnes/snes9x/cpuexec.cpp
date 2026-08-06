@@ -65,6 +65,42 @@
 void S9xMainLoop (struct SRegisters * reg, struct SICPU * icpu, struct SCPUState * cpu)
 {
 #else
+#ifdef PIKO_DYNAREC_EXEC
+/*
+ * Cheap "could a block even start here?" filter, inlined at the dispatch site.
+ *
+ * dyn_exec_step pushes NINE callee-saved registers and a 28-byte frame before
+ * it looks at anything (checked in the disassembly), and with WRAM blocks off
+ * it then throws away ~72% of dispatches -- having paid a call, a prologue,
+ * and a second out-of-line call to dyn_wram_offset_of, which -Os declined to
+ * inline despite the keyword and which returns its result through memory.
+ *
+ * always_inline, not a hint: `static __inline` on exactly this test is what
+ * failed to inline last time, and the resulting no-op change measured flat and
+ * was nearly recorded as "hypothesis disproved".
+ *
+ * This must agree with dyn_wram_offset_of. It is only a FILTER -- dyn_exec_step
+ * re-checks -- so a false "yes" costs a wasted call and nothing else; a false
+ * "no" would silently stop translating a region, which is why it mirrors the
+ * mirror handling exactly rather than approximating it.
+ */
+static __inline__ __attribute__((always_inline))
+int piko_block_possible (void)
+{
+	uint32 bank, off;
+
+	if (dyn_exec_wram_blocks)
+		return 1;                       /* WRAM blocks on: everything is fair game */
+	bank = (uint32) Registers.PB & 0xFF;
+	if (bank == 0x7E || bank == 0x7F)
+		return 0;
+	off = (uint32) (uint16) (CPU.PC - CPU.PCBase);
+	if (off < 0x2000 && (bank < 0x40 || (bank >= 0x80 && bank < 0xC0)))
+		return 0;
+	return 1;
+}
+#endif
+
 void S9xMainLoop (void)
 {
 	struct SICPU		* icpu  = &ICPU;
@@ -160,7 +196,8 @@ void S9xMainLoop (void)
 		 * 40.91 -> 39.40 frames/s. Whatever the ~20% cost of arming EXEC is,
 		 * the per-dispatch cache lookup is not it. See README section 10.
 		 */
-		if (dyn_exec_on && dyn_exec_step (&Registers, &ICPU, &CPU))
+		if (dyn_exec_on && piko_block_possible ()
+		    && dyn_exec_step (&Registers, &ICPU, &CPU))
 			goto piko_after_dispatch;
 #endif
 #ifdef CPU_SHUTDOWN

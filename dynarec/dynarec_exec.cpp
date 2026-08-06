@@ -403,8 +403,11 @@ void dyn_exec_report(void)
 	 */
 	fprintf(stderr, "DYN-EXEC: %lu instructions dispatched outside blocks\n",
 	        dyn_interp_dispatches);
-	fprintf(stderr, "DYN-EXEC: %lu dispatches skipped as WRAM (self-modifying)\n",
-	        e_wram_skip);
+	/* Near zero is EXPECTED and not a broken probe: with WRAM blocks off,
+	 * cpuexec.cpp's inline filter rejects those dispatches before this function
+	 * is called, which is the entire point of it. */
+	fprintf(stderr, "DYN-EXEC: %lu WRAM dispatches reached this function"
+	                " (the inline filter takes the rest)\n", e_wram_skip);
 	/*
 	 * e_inval_blocks is the thing to watch. If it tracks e_wram_blocks closely,
 	 * blocks are being thrown away about as fast as they are built and the
