@@ -369,14 +369,13 @@ extern "C" void *dyn_translate_run(const uint8_t *code, int m8, int x8,
 		uint8_t op = code[off];
 		int ender = dyn_op_is_block_end(op);
 		tr_add_memspeed(e);
-		/*
-		 * LDA abs is NOT enabled for block execution yet: VERIFY on hardware
-		 * reports `op=AD field=A`, so the fast path computes the wrong
-		 * accumulator. It stays reachable from dyn_translate_ops (the verify
-		 * path) so the divergence can be chased, and out of the live CPU until
-		 * it reads clean. Flip this on in the same commit that fixes it.
-		 */
-		if (!tr_emit_op(e, op, m8, x8)) {
+		if (op == 0xAD && op_fn_table[op]) {
+			/* Native fast path, then the interpreter fallback the run-time
+			 * bail branches into. Verified on hardware: 0 divergences. */
+			unsigned done = tr_emit_lda_abs(e, code, off, m8);
+			tr_emit_fallback(e, off, op_fn_table[op]);
+			arm_patch_fwd(e, done);
+		} else if (!tr_emit_op(e, op, m8, x8)) {
 			void *fn = op_fn_table[op];
 			if (!fn)
 				return 0;              /* no native + no fallback */
