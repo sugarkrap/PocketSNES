@@ -107,6 +107,34 @@ void dyn_verify_after(unsigned char op, struct SRegisters *reg,
 	void *stub;
 
 	/*
+	 * Skip instructions whose operand lands on the I/O handler tier.
+	 *
+	 * run-both-and-diff executes the instruction TWICE -- interpreter first,
+	 * then the generated stub on a copy -- and that is only sound for reads
+	 * without side effects. FF6's `LDA $4210` reads RDNMI, which CLEARS the
+	 * NMI flag: the interpreter got 0x80, the stub re-read it and got 0x00,
+	 * and the harness reported a divergence in A for a fast path that was
+	 * behaving perfectly (cycles matched exactly, because the bail to the
+	 * interpreter fallback worked).
+	 *
+	 * Verifying the handler tier is not the point anyway: on a bail the block
+	 * runs the interpreter, so there is nothing of ours left to check. What
+	 * matters is the RAM/ROM fast path, which is side-effect free and
+	 * re-runnable. So probe the same Map the emitted code probes, in C, and
+	 * only verify when the address is direct memory.
+	 */
+	if (op == 0xAD) {
+		uint32_t a = (uint32_t)(((const unsigned char *)s_cpu.PC)[1]
+		           | (((const unsigned char *)s_cpu.PC)[2] << 8))
+		           + s_icpu.ShiftedDB;
+		int blk = (a >> MEMMAP_SHIFT) & MEMMAP_MASK;
+		if (Memory.Map[blk] < (uint8 *)CMemory::MAP_LAST)
+			return;                       /* handler tier: not re-runnable */
+		if (!m8 && a == 0x00001FFF)
+			return;                       /* straddle case bails too */
+	}
+
+	/*
 	 * Translate THIS instruction, from the bytes it actually has. s_cpu.PC
 	 * points at the opcode byte (cpuexec.cpp snapshots before the `*CPU.PC++`
 	 * dispatch), so operands follow it in guest memory exactly as the block
@@ -147,8 +175,16 @@ void dyn_verify_after(unsigned char op, struct SRegisters *reg,
 	v_total++;
 	if (w) {
 		v_div++;
-		if (v_div <= 20)
-			fprintf(stderr, "DYN-VERIFY DIVERGE op=%02X field=%s\n", op, w);
+		if (v_div <= 12)
+			fprintf(stderr,
+			        "DYN-VERIFY DIVERGE op=%02X field=%s | native A=%04X "
+			        "interp A=%04X | pre A=%04X DB=%02X ShiftedDB=%06X "
+			        "operand=%02X%02X m8=%d cyc n=%ld i=%ld\n",
+			        op, w, cr.A.W, reg->A.W, s_reg.A.W, s_reg.DB,
+			        (unsigned)s_icpu.ShiftedDB,
+			        ((const unsigned char *)s_cpu.PC)[2],
+			        ((const unsigned char *)s_cpu.PC)[1],
+			        m8, (long)cc.Cycles, (long)cpu->Cycles);
 	}
 	if ((v_total % 250000UL) == 0)
 		fprintf(stderr, "DYN-VERIFY: %lu checked, %lu diverged\n", v_total, v_div);
