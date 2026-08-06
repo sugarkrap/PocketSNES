@@ -215,7 +215,56 @@ default until it's proven; the shipped binary stays the known-good interpreter.
     can self-modify and needs cache invalidation we don't have yet. NO speed win
     expected until native opcode coverage grows (blocks are still mostly
     fallbacks). 1 MiB code arena, flushed wholesale when full.
+  - [ ] **LDA/STA with inlined memory fast paths** -- the hot set from
+    section 7 that is still entirely interpreter fallback. Design, from
+    reading getset.h and cpuops.cpp:
+
+    `S9xGetByte` is already a two-tier lookup, and only the fast tier needs
+    inlining:
+
+        block = (addr >> MEMMAP_SHIFT) & MEMMAP_MASK   /* shift 12, mask 0xFFF */
+        p     = Memory.Map[block]
+        if (p >= (uint8 *)CMemory::MAP_LAST) {         /* direct memory */
+            cpu->Cycles += Memory.MemorySpeed[block];
+            if (Memory.BlockIsRAM[block])
+                cpu->WaitAddress = cpu->PCAtOpcodeStart;
+            return p[addr & 0xFFFF];
+        }
+        /* else: MAP_PPU/MAP_CPU/... -- do NOT inline, fall back */
+
+    So the emitted sequence is: compute the effective address, index Map,
+    one compare against MAP_LAST, and either the inline load or a branch to
+    the existing tr_emit_fallback() for that opcode. The slow tier keeps its
+    single implementation; we are not reimplementing PPU/CPU register access
+    in ARM, which is where a rewrite of this would go wrong.
+
+    The win that makes this worth more than shaving cycles: for `LDA abs`
+    ($AD), `STA abs` ($8D) and friends the OPERAND IS A COMPILE-TIME
+    CONSTANT -- we are translating a known PC, so the 16-bit absolute address
+    is read out of the ROM at translation time and embedded as an immediate.
+    Only the bank has to come from a register (`reg->DB` for absolute,
+    `reg->PB` for long). That removes the operand fetch entirely, not just
+    its dispatch overhead.
+
+    Correctness constraints that must hold, since blocks run as the live CPU:
+      - cycle parity: the interpreter adds MemorySpeed[block] per access via
+        VAR_CYCLES, plus whatever Absolute()/LDA8() add for the operand
+        fetch. VERIFY diffs cycles, so this is checkable rather than hoped.
+      - CPU_SHUTDOWN: BlockIsRAM blocks set cpu->WaitAddress; skipping that
+        changes idle-loop detection and therefore timing.
+      - add each new opcode to dyn_verify_translatable() as it lands, so the
+        run-both-and-diff net actually covers it. VERIFY on hardware is cheap
+        (53,908 checks in 60s) and is what proved the existing opcode set
+        correct on a real PXA270.
+
+  - [ ] Branches as native conditionals + block linking, so a loop stops
+    re-entering the hash lookup on every iteration.
+  - [ ] Extend the profiler to report native-vs-fallback instruction counts
+    and WRAM-skip counts, so the next move after that is measured. Note it
+    cannot be armed together with EXEC (see section 9).
   - [ ] Idle-loop detection for the boot spin (`$FA:00F9` CLC/LDA/BPL).
+    Deliberately LAST: it deletes work rather than speeding it up, so doing
+    it first would mask how much the other items are actually worth.
 - [ ] **Step 4 — Memory fast paths** (inline RAM/ROM; MMIO → C handlers) and
   ALU/addressing modes.
 - [ ] **Step 5 — Block linking / branch chaining**, cycle-accurate event
@@ -302,6 +351,24 @@ hardware. Two regimes:
   `$001500` — bank `$00` — which the game reinstalls every frame. Use
   `dyn_pc_in_wram()`; a bank-only test silently lets those blocks into the
   cache.
+
+## 9. Gates that cannot be combined, and other traps
+
+- **EXEC and PROFILE are mutually blind.** When a translated block runs,
+  cpuexec.cpp does `goto piko_after_dispatch`, which jumps past the profiler
+  hook. Arming both gives a profile of only what the dynarec did NOT run, and
+  no block counters worth reading. Run them separately.
+- **Always `make clean` when changing gate flags.** Makefile.zaurus does not
+  track the dynarec `-D` flags, so switching between EXEC=1 / VERIFY=1 /
+  PROFILE=1 silently links objects compiled under the previous set. This
+  produced a run that printed "DYN-EXEC: armed" and then "FINAL 0 blocks run";
+  the identical flags built clean gave 5,789,931 blocks.
+- **Both gates report only on an interval** (4M blocks, 250k checks), so a
+  short run can end having printed nothing -- which looks exactly like the
+  feature never running. dyn_exec_report()/dyn_verify_report() print at exit;
+  use them rather than inferring from silence.
+- **The device cannot stop a process.** No `kill` applet, no `timeout` applet,
+  no ash kill builtin. Use PIKO_MAX_SECONDS; see dynarec/run-on-zaurus.sh.
 
 ## 8. Files
 
