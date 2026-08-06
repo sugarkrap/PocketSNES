@@ -124,6 +124,22 @@ CFLAGS   += -DPIKO_DYNAREC_EXEC -DPIKO_DYNAREC_WRAMSTAT
 CXXFLAGS += -DPIKO_DYNAREC_EXEC -DPIKO_DYNAREC_WRAMSTAT
 endif
 
+# `make NOCOUNT=1` compiles out the dynarec's hot-path counters. Ablation only:
+# it makes the diagnostics read zero, and says so in the report. See
+# dynarec_exec.h.
+# `make BLOCKSTATS=1` adds the per-block native/fallback instruction accounting
+# to the report. Off by default because it costs 4.5% of the block path: two
+# array loads and two global updates on every block run. See dynarec_exec.cpp.
+ifdef BLOCKSTATS
+CFLAGS   += -DPIKO_DYN_BLOCKSTATS
+CXXFLAGS += -DPIKO_DYN_BLOCKSTATS
+endif
+
+ifdef NOCOUNT
+CFLAGS   += -DPIKO_DYN_NOCOUNT
+CXXFLAGS += -DPIKO_DYN_NOCOUNT
+endif
+
 LDFLAGS = $(CXXFLAGS) \
 		-L$(DEPS_STAGE)/usr/lib -Wl,-rpath-link=$(DEPS_STAGE)/usr/lib \
 		-Wl,-rpath-link=$(SDL_STAGE)/usr/lib \

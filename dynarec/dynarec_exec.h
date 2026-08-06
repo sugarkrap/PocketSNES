@@ -27,6 +27,25 @@ struct SRegisters;
 struct SICPU;
 struct SCPUState;
 
+/*
+ * Hot-path counters, compiled out by `make NOCOUNT=1` (-DPIKO_DYN_NOCOUNT).
+ *
+ * These sit on paths taken by nearly every dispatched instruction, and each is
+ * a load/add/store to a global in its own cache line. Bisection put ~17% of
+ * the cost of arming EXEC inside dyn_exec_step's body, after the blocks, the
+ * lookup count, the table footprint and the WRAM call were each ruled out on
+ * hardware -- so the counters are the next suspect, and this is how they get
+ * ruled in or out rather than argued about.
+ *
+ * A NOCOUNT build reports zeroes. It says so when it does: a silent zero reads
+ * exactly like "the probe never fired".
+ */
+#ifdef PIKO_DYN_NOCOUNT
+#define DYN_COUNT(stmt) ((void)0)
+#else
+#define DYN_COUNT(stmt) do { stmt; } while (0)
+#endif
+
 extern int dyn_exec_on;
 
 /* Instructions the interpreter dispatched individually (i.e. NOT inside a

@@ -716,3 +716,42 @@ pointed at the dispatch loop rather than another guess.
 wrong, and each cost a build-deploy-measure cycle. The arithmetic was available
 in advance for at least two of them: ~23M lookups of ~20 instructions is on the
 order of 1% of a 90-second run, never 20%.
+
+## 12. Hypothesis 1: the counters. Partly right, and worth 4.5%
+
+Bisection (section 11) put ~17% inside dyn_exec_step's body. First suspect on
+the list was the global counters incremented on nearly every dispatch. Tested
+with `make NOCOUNT=1`, which compiles them all out, against the same configs:
+
+| configuration | counted | NOCOUNT | delta |
+|---|---|---|---|
+| disarmed              | 51.11 | 51.98 | +1.7% |
+| armed, zero blocks    | 40.16 | 40.66 | +1.2% |
+| armed, blocks running | 43.23 | **45.16** | **+4.5%** |
+
+Two different answers in one table, and the difference between them is the
+finding:
+
+  - On the **dispatch** path the counters cost ~1.2%. So they are NOT the 17%.
+    Hypothesis 1 is mostly wrong, like the four before it.
+  - On the **block** path they cost 4.5%, which is real and was being paid on
+    every single block run for a diagnostic.
+
+The expensive one is the native/fallback split: `e_insn_nat += exec_nat[slot]`
+is two loads from 32 KB arrays plus two global read-modify-writes, per block.
+It is now behind `make BLOCKSTATS=1` and off by default; e_blocks stays,
+because the FINAL line is how a run is known to have done anything. A build
+without it says so in the report rather than printing a silent zero.
+
+Default EXEC build after the change: **44.63** against 43.23, with an identical
+5,698,515 blocks run. Overhead against disarmed (51.56) is down from ~20% to
+~13.4%.
+
+Still outstanding, and still in this order:
+  2. the pc reconstruction -- reg->PB, cpu->PC, cpu->PCBase, reg->P.W is four
+     loads across three structs, per dispatch;
+  3. I-cache displacement of the interpreter's dispatch loop.
+
+Six hypotheses tested so far, one and a half right. The ablation knobs
+(PIKO_DYN_STUB / _SLOTS / _MIN_NATIVE, make NOCOUNT / BLOCKSTATS) are what
+makes being wrong cheap, and they are worth more than any single answer.

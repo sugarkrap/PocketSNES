@@ -370,8 +370,15 @@ static void *exec_translate(struct SICPU *icpu, struct SCPUState *cpu,
 void dyn_exec_report(void)
 {
 	unsigned long tot = e_insn_nat + e_insn_fb;
-	fprintf(stderr, "DYN-EXEC: FINAL %lu blocks run, %lu translated, %lu flushes\n",
-	        e_blocks, e_translated, e_flushes);
+	fprintf(stderr, "DYN-EXEC: FINAL %lu blocks run, %lu translated, %lu flushes%s\n",
+	        e_blocks, e_translated, e_flushes,
+#ifdef PIKO_DYN_NOCOUNT
+	        "  [NOCOUNT build: other counters below read 0 because they are"
+	        " compiled out, not because nothing happened]"
+#else
+	        ""
+#endif
+	        );
 	/*
 	 * STATIC instruction counts: each dispatch charges the block's whole
 	 * translated length. That was exact until branches stopped ending blocks;
@@ -380,8 +387,14 @@ void dyn_exec_report(void)
 	 * executed-instruction counts -- they can exceed the instructions the
 	 * emulated CPU actually issued, and did.
 	 */
+#ifdef PIKO_DYN_BLOCKSTATS
 	fprintf(stderr, "DYN-EXEC: block contents (static) %lu native + %lu fallback = %lu (%lu%% native)\n",
 	        e_insn_nat, e_insn_fb, tot, tot ? (e_insn_nat * 100UL) / tot : 0UL);
+#else
+	(void)tot;
+	fprintf(stderr, "DYN-EXEC: block native/fallback split not built"
+	                " (make BLOCKSTATS=1; costs 4.5%%)\n");
+#endif
 	/*
 	 * The coverage question, and the one that decides whether any of this can
 	 * pay: how many instructions does the interpreter dispatch one at a time,
@@ -452,7 +465,7 @@ int dyn_exec_step(struct SRegisters *reg, struct SICPU *icpu, struct SCPUState *
 	if (!dyn_exec_wram_blocks) {
 		uint32_t woff;
 		if (dyn_wram_offset_of(pc, &woff)) {
-			e_wram_skip++;
+			DYN_COUNT (e_wram_skip++);
 			return 0;
 		}
 	}
@@ -460,7 +473,7 @@ int dyn_exec_step(struct SRegisters *reg, struct SICPU *icpu, struct SCPUState *
 	key = (pc << 2) | (uint32_t)((m8 ? 2 : 0) | (x8 ? 1 : 0));
 
 	native = exec_find(key, &slot);
-	if (native == EXEC_DECLINED) { e_declined_hits++; return 0; }
+	if (native == EXEC_DECLINED) { DYN_COUNT (e_declined_hits++); return 0; }
 	if (!native) {
 		native = exec_translate(icpu, cpu, m8, x8, key, pc);
 		if (!native) return 0;
@@ -468,10 +481,21 @@ int dyn_exec_step(struct SRegisters *reg, struct SICPU *icpu, struct SCPUState *
 	}
 
 	((block_fn)native)(reg, icpu, cpu);
+	/*
+	 * The native/fallback split costs two loads from 32 KB arrays plus two
+	 * global read-modify-writes on EVERY block run, and measured 4.5% of the
+	 * block path (43.23 -> 45.16 frames/s with it out). It is a diagnostic, so
+	 * it is off unless asked for: `make BLOCKSTATS=1`. e_blocks stays, because
+	 * the FINAL line is how a run is known to have done anything at all.
+	 */
+#ifdef PIKO_DYN_BLOCKSTATS
 	if (slot < EXEC_SLOTS) {
 		e_insn_nat += exec_nat[slot];
 		e_insn_fb  += exec_fb[slot];
 	}
+#else
+	(void)slot;
+#endif
 	if (((++e_blocks) % 4000000UL) == 0)
 		fprintf(stderr, "DYN-EXEC: %lu blocks run, %lu translated, %lu flushes\n",
 		        e_blocks, e_translated, e_flushes);

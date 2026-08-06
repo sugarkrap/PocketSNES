@@ -59,9 +59,13 @@ static void piko_report_frames(void)
 	 * Instructions/frame separates "slower per instruction" from "causing more
 	 * instructions to run", and those want opposite fixes.
 	 */
+#ifdef PIKO_DYN_NOCOUNT
+	fprintf(stderr, "PIKO: interpreter dispatch counter compiled out (NOCOUNT)\n");
+#else
 	fprintf(stderr, "PIKO: %lu interpreter dispatches (%lu per frame)\n",
 	        dyn_interp_dispatches,
 	        piko_frames ? dyn_interp_dispatches / piko_frames : 0);
+#endif
 #endif
 }
 

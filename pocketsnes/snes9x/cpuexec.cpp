@@ -197,7 +197,7 @@ void S9xMainLoop (void)
 		/* Unconditional: gating this on dyn_exec_on made armed and disarmed
 		 * runs incomparable, so "is the dynarec slower per instruction, or is
 		 * it causing MORE instructions to run?" could not be answered. */
-		dyn_interp_dispatches++;
+		DYN_COUNT (dyn_interp_dispatches++);
 #endif
 		(*ICPU.S9xOpcodes [*CPU.PC++].S9xOpcode) (&Registers, &ICPU, &CPU);
 #ifdef PIKO_DYNAREC_VERIFY
