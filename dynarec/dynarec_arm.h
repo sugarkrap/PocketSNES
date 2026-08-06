@@ -140,6 +140,68 @@ static inline void arm_cmp_imm(ArmEmit *e, int Rn, uint32_t imm8)
 /* ARM condition codes (for conditional forms) */
 #define ARM_EQ 0x0
 #define ARM_NE 0x1
+#define ARM_CS 0x2   /* unsigned >=  (aka HS) */
+#define ARM_CC 0x3   /* unsigned <   (aka LO) */
+#define ARM_AL 0xE
+
+/* CMP Rn, Rm  -- register compare, base 0xE1500000. */
+static inline void arm_cmp_reg(ArmEmit *e, int Rn, int Rm)
+{
+	arm_emit(e, 0xE1500000u | ((uint32_t)Rn << 16) | ((uint32_t)Rm & 0xF));
+}
+
+/*
+ * Forward branches.
+ *
+ * The emitter has no label machinery, so a forward branch is emitted with a
+ * placeholder offset and patched once the target is known:
+ *
+ *     unsigned f = arm_b_cc_fwd(e, ARM_CC);   // branch if unsigned <
+ *     ... emitted code the branch skips over ...
+ *     arm_patch_fwd(e, f);                    // now points here
+ *
+ * arm_b_cc_fwd returns the WORD INDEX of the branch it emitted; patching
+ * computes the offset from that index to the current position. The ARM branch
+ * offset is (target - (branch + 2)) in words, because the PC reads two
+ * instructions ahead.
+ */
+static inline unsigned arm_b_cc_fwd(ArmEmit *e, int cc)
+{
+	unsigned at = arm_emit_count(e);
+	arm_emit(e, ((uint32_t)cc << 28) | 0x0A000000u);
+	return at;
+}
+
+static inline void arm_patch_fwd(ArmEmit *e, unsigned at)
+{
+	uint32_t *ins;
+	int32_t off;
+	if (at >= arm_emit_count(e)) { e->overflow = 1; return; }
+	ins = e->base + at;
+	off = (int32_t)arm_emit_count(e) - (int32_t)at - 2;
+	*ins = (*ins & 0xFF000000u) | ((uint32_t)off & 0x00FFFFFFu);
+}
+
+/* LDR Rd, [Rn, Rm, LSL #sh]  -- register-indexed word load, base 0xE7900000. */
+static inline void arm_ldr_reg_lsl(ArmEmit *e, int Rd, int Rn, int Rm, int sh)
+{
+	arm_emit(e, 0xE7900000u | ((uint32_t)Rn << 16) | ((uint32_t)Rd << 12)
+	            | (((uint32_t)sh & 0x1F) << 7) | ((uint32_t)Rm & 0xF));
+}
+
+/* LDRB Rd, [Rn, Rm]  -- register-indexed byte load, base 0xE7D00000. */
+static inline void arm_ldrb_reg(ArmEmit *e, int Rd, int Rn, int Rm)
+{
+	arm_emit(e, 0xE7D00000u | ((uint32_t)Rn << 16) | ((uint32_t)Rd << 12)
+	            | ((uint32_t)Rm & 0xF));
+}
+
+/* STRB Rd, [Rn, Rm]  -- register-indexed byte store, base 0xE7C00000. */
+static inline void arm_strb_reg(ArmEmit *e, int Rd, int Rn, int Rm)
+{
+	arm_emit(e, 0xE7C00000u | ((uint32_t)Rn << 16) | ((uint32_t)Rd << 12)
+	            | ((uint32_t)Rm & 0xF));
+}
 
 /* MOV<cc> Rd, #imm8  -- conditional immediate move (base minus cond = 0x03A00000). */
 static inline void arm_mov_imm8_cc(ArmEmit *e, int cc, int Rd, uint32_t imm8)

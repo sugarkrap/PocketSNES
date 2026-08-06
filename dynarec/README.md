@@ -252,6 +252,21 @@ default until it's proven; the shipped binary stays the known-good interpreter.
         fetch. VERIFY diffs cycles, so this is checkable rather than hoped.
       - CPU_SHUTDOWN: BlockIsRAM blocks set cpu->WaitAddress; skipping that
         changes idle-loop detection and therefore timing.
+      - **probe before charging cycles.** The MAP_LAST test must come before
+        any Cycles update. If the address turns out to be a handler and we
+        bail to the interpreter fallback, that fallback runs Absolute() and
+        LDA8() itself and charges MemSpeedx2 + MemorySpeed again -- so any
+        cycles added before the bail are counted twice. Split the sequence
+        into a side-effect-free probe (block, Map load, compare, bail) and a
+        commit (Cycles += MemSpeedx2, Cycles += MemorySpeed[block],
+        BlockIsRAM -> WaitAddress, the byte load).
+      - the block must set `cpu->PCAtOpcodeStart = pcbase + off` before the
+        access, because the CPU_SHUTDOWN path reads it and the interpreter
+        sets it per opcode in cpuexec.cpp. Both VAR_CYCLES and CPU_SHUTDOWN
+        are on in this build (pocketsnes/linux/port.h).
+      - still to check before writing the 16-bit path: what S9xGetWord
+        charges for a word access, since it does its own single Map lookup
+        rather than two byte accesses.
       - add each new opcode to dyn_verify_translatable() as it lands, so the
         run-both-and-diff net actually covers it. VERIFY on hardware is cheap
         (53,908 checks in 60s) and is what proved the existing opcode set
