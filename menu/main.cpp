@@ -443,6 +443,25 @@ int Run(int sound)
 				//Run SNES for one glorious frame
 				S9xMainLoop ();
 
+				/* Checked per FRAME, not per 10-frame batch: a VERIFY build
+				 * runs at about 1 FPS, so a batch granularity turned a 25s
+				 * bound into minutes. This is the only thing that can stop the
+				 * process on a device whose busybox has no kill. */
+				if (piko_deadline && time(NULL) >= piko_deadline) {
+					fprintf(stderr, "PIKO_MAX_SECONDS reached, exiting\n");
+#ifdef PIKO_DYNAREC_EXEC
+					if (dyn_exec_on) dyn_exec_report();
+#endif
+#ifdef PIKO_DYNAREC_VERIFY
+					if (dyn_verify_on) dyn_verify_report();
+#endif
+#ifdef PIKO_DYNAREC_PROFILE
+					if (dyn_profile_on) dyn_profile_dump(12, 12);
+#endif
+					fflush(stderr); fflush(stdout);
+					exit(0);
+				}
+
 				if (sound) {
 					S9xMixSamples((uint8 *) sal_GetCurrentAudioBuffer(),
 								sal_AudioGetSampleCount());
@@ -704,6 +723,12 @@ int mainEntry(int argc, char* argv[])
 	 * machine wedges and stops producing frames, a frame count never reaches
 	 * its limit and the bound silently does not exist.
 	 */
+	/*
+	 * Build stamp. Several hardware runs today were diagnosed against a binary
+	 * that had failed to copy, and the only thing that ever caught it was an
+	 * opcode count that happened to change. Say which build this is, always.
+	 */
+	fprintf(stderr, "PIKO build %s %s\n", __DATE__, __TIME__);
 	{
 		const char *ms = getenv("PIKO_MAX_SECONDS");
 		if (ms && *ms)
