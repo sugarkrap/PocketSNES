@@ -53,25 +53,66 @@ extern "C" {
 #define TR_SAVES ((1u<<ARM_R4)|(1u<<ARM_R5)|(1u<<ARM_R6)|(1u<<ARM_R7)| \
                   (1u<<ARM_R8)|(1u<<ARM_R9)|(1u<<ARM_R10))
 
-static void tr_prologue(ArmEmit *e)
+/*
+ * Which of the pinned A/X/Y a block actually uses natively.
+ *
+ * Blocks average 2.66 instructions, so caching all three guest registers in
+ * ARM registers was pure loss: three loads in the prologue, three stores in
+ * the epilogue, and -- the expensive part -- three stores plus three loads
+ * bracketing EVERY interpreter fallback, of which there are ~1.5 per block.
+ * A register no native op in this block touches does not need to be cached
+ * at all; the interpreter's own copy in SRegisters stays authoritative.
+ *
+ * The mask MUST agree with what tr_emit_op/tr_emit_lda_abs actually emit.
+ * Claiming fewer registers than are used means a fallback stops spilling one
+ * the native code is caching, and the block and the interpreter silently
+ * disagree about the machine state -- a corruption bug, not a slow path.
+ */
+#define TR_USE_A 1
+#define TR_USE_X 2
+#define TR_USE_Y 4
+
+/*
+ * -1 if `op` is not emitted natively, otherwise the pinned registers it uses.
+ * ONE function answers both questions so the two cannot drift apart: an op
+ * listed as native but omitted here would be emitted with its register
+ * unpinned, and the fallback bracketing would stop spilling a register the
+ * native code is caching. Pass 2 re-checks the dangerous direction.
+ *
+ * Keep in step with tr_emit_op's switch (and the 0xAD case in
+ * dyn_translate_run, which is native only when a fallback table exists for
+ * its run-time bail).
+ */
+static int tr_op_native_mask(uint8_t op)
+{
+	switch (op) {
+	case 0x18: case 0x38: case 0xEA: return 0;          /* CLC/SEC/NOP */
+	case 0xE8: case 0xCA:            return TR_USE_X;   /* INX/DEX     */
+	case 0xC8: case 0x88:            return TR_USE_Y;   /* INY/DEY     */
+	case 0xAD:                       return TR_USE_A;   /* LDA abs     */
+	default:                         return -1;
+	}
+}
+
+static void tr_prologue(ArmEmit *e, unsigned mask)
 {
 	arm_push(e, TR_SAVES | (1u << ARM_LR));
 	arm_mov_reg(e, TR_REG,  ARM_R0);
 	arm_mov_reg(e, TR_ICPU, ARM_R1);
 	arm_mov_reg(e, TR_CPU,  ARM_R2);
-	arm_ldrh_imm(e, TR_A, TR_REG, offsetof(struct SRegisters, A));
-	arm_ldrh_imm(e, TR_X, TR_REG, offsetof(struct SRegisters, X));
-	arm_ldrh_imm(e, TR_Y, TR_REG, offsetof(struct SRegisters, Y));
+	if (mask & TR_USE_A) arm_ldrh_imm(e, TR_A, TR_REG, offsetof(struct SRegisters, A));
+	if (mask & TR_USE_X) arm_ldrh_imm(e, TR_X, TR_REG, offsetof(struct SRegisters, X));
+	if (mask & TR_USE_Y) arm_ldrh_imm(e, TR_Y, TR_REG, offsetof(struct SRegisters, Y));
 	/* base host pointer for computing cpu->PC at fallback sites: the block is
 	 * entered with cpu->PC pointing at its first opcode byte. */
 	arm_ldr_imm(e, TR_PCBASE, TR_CPU, offsetof(struct SCPUState, PC));
 }
 
-static void tr_epilogue(ArmEmit *e)
+static void tr_epilogue(ArmEmit *e, unsigned mask)
 {
-	arm_strh_imm(e, TR_A, TR_REG, offsetof(struct SRegisters, A));
-	arm_strh_imm(e, TR_X, TR_REG, offsetof(struct SRegisters, X));
-	arm_strh_imm(e, TR_Y, TR_REG, offsetof(struct SRegisters, Y));
+	if (mask & TR_USE_A) arm_strh_imm(e, TR_A, TR_REG, offsetof(struct SRegisters, A));
+	if (mask & TR_USE_X) arm_strh_imm(e, TR_X, TR_REG, offsetof(struct SRegisters, X));
+	if (mask & TR_USE_Y) arm_strh_imm(e, TR_Y, TR_REG, offsetof(struct SRegisters, Y));
 	arm_pop(e, TR_SAVES | (1u << ARM_PC));
 }
 
@@ -105,11 +146,14 @@ static void tr_add_cycles(ArmEmit *e, int n)
  * reg/icpu/cpu (r8/r9/r10) and pcbase (r7) are callee-saved, so the C fn
  * preserves them across the call; only r0-r3/r12 are clobbered, all re-derived.
  */
-static void tr_emit_fallback(ArmEmit *e, unsigned guest_off, void *fn)
+static void tr_emit_fallback(ArmEmit *e, unsigned guest_off, void *fn, unsigned mask)
 {
-	arm_strh_imm(e, TR_A, TR_REG, offsetof(struct SRegisters, A));
-	arm_strh_imm(e, TR_X, TR_REG, offsetof(struct SRegisters, X));
-	arm_strh_imm(e, TR_Y, TR_REG, offsetof(struct SRegisters, Y));
+	/* Only the registers this block actually caches. An unpinned register is
+	 * already authoritative in SRegisters, so spilling it would write a stale
+	 * value over the interpreter's own. */
+	if (mask & TR_USE_A) arm_strh_imm(e, TR_A, TR_REG, offsetof(struct SRegisters, A));
+	if (mask & TR_USE_X) arm_strh_imm(e, TR_X, TR_REG, offsetof(struct SRegisters, X));
+	if (mask & TR_USE_Y) arm_strh_imm(e, TR_Y, TR_REG, offsetof(struct SRegisters, Y));
 
 	arm_mov32(e, TR_TMP, guest_off + 1);
 	arm_add_reg(e, TR_TMP, TR_PCBASE, TR_TMP);
@@ -121,9 +165,9 @@ static void tr_emit_fallback(ArmEmit *e, unsigned guest_off, void *fn)
 	arm_mov32(e, TR_TMP, (uint32_t)(uintptr_t)fn);
 	arm_blx(e, TR_TMP);
 
-	arm_ldrh_imm(e, TR_A, TR_REG, offsetof(struct SRegisters, A));
-	arm_ldrh_imm(e, TR_X, TR_REG, offsetof(struct SRegisters, X));
-	arm_ldrh_imm(e, TR_Y, TR_REG, offsetof(struct SRegisters, Y));
+	if (mask & TR_USE_A) arm_ldrh_imm(e, TR_A, TR_REG, offsetof(struct SRegisters, A));
+	if (mask & TR_USE_X) arm_ldrh_imm(e, TR_X, TR_REG, offsetof(struct SRegisters, X));
+	if (mask & TR_USE_Y) arm_ldrh_imm(e, TR_Y, TR_REG, offsetof(struct SRegisters, Y));
 }
 
 /* cpu->WaitAddress = NULL  (CPU_SHUTDOWN idle-loop tracking, cleared by ops
@@ -297,7 +341,7 @@ static unsigned tr_emit_lda_abs(ArmEmit *e, const uint8_t *code, unsigned off, i
 		tr_setzn16(e, TR_A);
 	}
 
-	done = arm_b_cc_fwd(e, ARM_AL);
+	done = arm_b_cc_fwd(e, ARM_COND_AL);
 	arm_patch_fwd(e, bail);
 	if (!m8)
 		arm_patch_fwd(e, straddle);
@@ -365,13 +409,58 @@ static void tr_add_memspeed(ArmEmit *e)
  * the execution count instead of counting per instruction at run time. */
 unsigned dyn_tr_native, dyn_tr_fallback;
 
+/* Blocks declined because translating them could only lose. Reported by
+ * DYN-EXEC so the decision is visible rather than assumed. */
+unsigned long dyn_tr_declined_nonative;
+
+/* Set when the most recent dyn_translate_run declined for lack of any native
+ * instruction -- a permanent property of those guest bytes, so the caller can
+ * cache the refusal. The other ways to return 0 (emitter overflow, a missing
+ * fallback) are not stable and must NOT be cached. */
+int dyn_tr_last_declined;
+
 extern "C" void *dyn_translate_run(const uint8_t *code, int m8, int x8,
                                    void *const op_fn_table[256], ArmEmit *e)
 {
 	void *entry = (void *)e->cur;
 	unsigned off = 0;
+	unsigned mask = 0, n_native = 0;
+
+	dyn_tr_last_declined = 0;
+
+	/*
+	 * PASS 1: decide what this block needs before emitting its prologue.
+	 *
+	 * Two things come out of it. Which of A/X/Y to pin -- the prologue has to
+	 * know, and it is emitted first. And whether translating is worth doing at
+	 * all: a block with no native instructions is a prologue and an epilogue
+	 * wrapped around a chain of interpreter calls, which is strictly more work
+	 * than letting the interpreter dispatch them itself. Measured: the dynarec
+	 * ran ~20% slower than the interpreter, and blocks average 2.66
+	 * instructions, so this overhead is not a rounding error.
+	 */
+	for (;;) {
+		uint8_t op = code[off];
+		int ender = dyn_op_is_block_end(op);
+		int nm    = tr_op_native_mask(op);
+		int native = (op == 0xAD) ? (op_fn_table[op] != 0) : (nm >= 0);
+		if (native) { n_native++; if (nm >= 0) mask |= (unsigned)nm; }
+		off += (unsigned)dyn_op_length(op, m8, x8);
+		if (ender) break;
+		if (off >= DYN_BLOCK_MAX_BYTES)
+			return 0;                  /* no ender in range: let the interpreter run it */
+	}
+	if (n_native == 0) {
+		dyn_tr_declined_nonative++;
+		dyn_tr_last_declined = 1;
+		return 0;
+	}
+
+	/* PASS 2: emit. Walks identically -- same lengths, same ender test -- so
+	 * the two passes cannot disagree about where the block stops. */
+	off = 0;
 	dyn_tr_native = dyn_tr_fallback = 0;
-	tr_prologue(e);
+	tr_prologue(e, mask);
 	for (;;) {
 		uint8_t op = code[off];
 		int ender = dyn_op_is_block_end(op);
@@ -380,25 +469,30 @@ extern "C" void *dyn_translate_run(const uint8_t *code, int m8, int x8,
 			/* Native fast path, then the interpreter fallback the run-time
 			 * bail branches into. Verified on hardware: 0 divergences. */
 			unsigned done = tr_emit_lda_abs(e, code, off, m8);
-			tr_emit_fallback(e, off, op_fn_table[op]);
+			tr_emit_fallback(e, off, op_fn_table[op], mask);
 			arm_patch_fwd(e, done);
 			dyn_tr_native++;           /* fast path; may bail at run time */
 		} else if (!tr_emit_op(e, op, m8, x8)) {
 			void *fn = op_fn_table[op];
 			if (!fn)
 				return 0;              /* no native + no fallback */
-			tr_emit_fallback(e, off, fn);
+			tr_emit_fallback(e, off, fn, mask);
 			dyn_tr_fallback++;
 		} else {
+			/* Emitted natively but pass 1 did not declare it: the tables have
+			 * drifted, and `mask` is missing whatever register this op caches.
+			 * Refuse the block rather than emit one that spills the wrong set. */
+			if (tr_op_native_mask(op) < 0)
+				return 0;
 			dyn_tr_native++;
 		}
 		off += (unsigned)dyn_op_length(op, m8, x8);
 		if (ender)
 			break;
 		if (off >= DYN_BLOCK_MAX_BYTES)
-			return 0;                  /* no ender in range: let the interpreter run it */
+			return 0;
 	}
-	tr_epilogue(e);
+	tr_epilogue(e, mask);
 	return e->overflow ? 0 : entry;
 }
 
@@ -407,8 +501,20 @@ extern "C" void *dyn_translate_ops(const uint8_t *ops, int n, ArmEmit *e,
 {
 	void *entry = (void *)e->cur;
 	unsigned off = 0;
+	unsigned mask = 0;
 	int i;
-	tr_prologue(e);
+
+	/*
+	 * Same pinning decision as dyn_translate_run, for the same reason VERIFY
+	 * exists at all: the stub has to be the code a real block would emit for
+	 * these opcodes. Pinning all three here instead would verify a spill
+	 * pattern the exec path never generates.
+	 */
+	for (i = 0; i < n; i++) {
+		int nm = tr_op_native_mask(ops[i]);
+		if (nm >= 0) mask |= (unsigned)nm;
+	}
+	tr_prologue(e, mask);
 	for (i = 0; i < n; i++) {
 		uint8_t op = ops[i];
 		if (op == 0xAD) {
@@ -420,17 +526,17 @@ extern "C" void *dyn_translate_ops(const uint8_t *ops, int n, ArmEmit *e,
 			if (!fn)
 				return 0;
 			done = tr_emit_lda_abs(e, ops, off, m8);
-			tr_emit_fallback(e, off, fn);
+			tr_emit_fallback(e, off, fn, mask);
 			arm_patch_fwd(e, done);
 		} else if (!tr_emit_op(e, op, m8, x8)) {
 			void *fn = op_fn_table ? op_fn_table[op] : 0;
 			if (!fn)
 				return 0;   /* no native translation and no fallback */
-			tr_emit_fallback(e, off, fn);
+			tr_emit_fallback(e, off, fn, mask);
 		}
 		off += (unsigned)dyn_op_length(op, m8, x8);
 	}
-	tr_epilogue(e);
+	tr_epilogue(e, mask);
 	return e->overflow ? 0 : entry;
 }
 

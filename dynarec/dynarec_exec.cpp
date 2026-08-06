@@ -10,6 +10,8 @@
 #include "cpuexec.h"
 
 extern unsigned dyn_tr_native, dyn_tr_fallback;
+extern unsigned long dyn_tr_declined_nonative;
+extern int dyn_tr_last_declined;
 
 extern "C" {
 #include "dynarec_arm.h"
@@ -43,6 +45,13 @@ static size_t   code_cap, code_used;
  * probing walks through them, insertion reuses them. */
 #define EXEC_SLOTS 16384
 #define EXEC_MASK  (EXEC_SLOTS - 1)
+/*
+ * A cached REFUSAL. Declining an all-fallback block is only a win if the
+ * decision is remembered: without this, pass 1 re-walked and re-decoded the
+ * block on every single dispatch, 4.75M times in 90s, and throughput fell from
+ * 41.15 to 28.38 frames/s -- worse than translating the block had been.
+ */
+#define EXEC_DECLINED ((void *)1)
 #define EXEC_EMPTY 0
 #define EXEC_LIVE  1
 #define EXEC_TOMB  2
@@ -55,6 +64,7 @@ static unsigned long e_insn_nat, e_insn_fb, e_wram_skip;
 
 static unsigned long e_blocks, e_translated, e_flushes;
 static unsigned long e_wram_blocks, e_inval_calls, e_inval_blocks, e_wram_full;
+static unsigned long e_declined_hits;
 
 /*
  * WRAM blocks: page -> slot reverse index.
@@ -191,6 +201,7 @@ void dyn_exec_init(void)
 	e_blocks = e_translated = e_flushes = 0;
 	e_insn_nat = e_insn_fb = e_wram_skip = 0;
 	e_wram_blocks = e_inval_calls = e_inval_blocks = e_wram_full = 0;
+	e_declined_hits = 0;
 	fprintf(stderr, "DYN-EXEC: armed (%s; EXPERIMENTAL)\n",
 	        dyn_exec_wram_blocks ? "ROM + WRAM blocks, write-invalidated"
 	                             : "ROM blocks only");
@@ -281,6 +292,12 @@ static void *exec_translate(struct SICPU *icpu, struct SCPUState *cpu,
 			code_used = 0;
 			exec_reset_cache();
 			e_flushes++;
+		} else if (dyn_tr_last_declined) {
+			/* Remember the refusal. Nothing was emitted, so no arena is spent;
+			 * the slot exists purely so the next dispatch costs a hash lookup
+			 * instead of a full re-walk of the block. */
+			dyn_tr_native = dyn_tr_fallback = 0;
+			exec_insert(key, EXEC_DECLINED);
 		}
 		return 0;   /* run this block via the interpreter this time */
 	}
@@ -344,6 +361,10 @@ void dyn_exec_report(void)
 	 */
 	fprintf(stderr, "DYN-EXEC: WRAM blocks %lu translated, %lu invalidated in %lu events\n",
 	        e_wram_blocks, e_inval_blocks, e_inval_calls);
+	/* Blocks refused as all-fallback. These are dispatched by the interpreter
+	 * instead, which is strictly cheaper than wrapping them in a prologue. */
+	fprintf(stderr, "DYN-EXEC: %lu blocks declined (no native instruction), %lu cached-refusal hits\n",
+	        dyn_tr_declined_nonative, e_declined_hits);
 	fflush(stderr);
 }
 
@@ -379,6 +400,7 @@ int dyn_exec_step(struct SRegisters *reg, struct SICPU *icpu, struct SCPUState *
 	key = (pc << 2) | (uint32_t)((m8 ? 2 : 0) | (x8 ? 1 : 0));
 
 	native = exec_find(key, &slot);
+	if (native == EXEC_DECLINED) { e_declined_hits++; return 0; }
 	if (!native) {
 		native = exec_translate(icpu, cpu, m8, x8, key, pc);
 		if (!native) return 0;

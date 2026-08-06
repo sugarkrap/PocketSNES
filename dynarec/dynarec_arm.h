@@ -142,7 +142,12 @@ static inline void arm_cmp_imm(ArmEmit *e, int Rn, uint32_t imm8)
 #define ARM_NE 0x1
 #define ARM_CS 0x2   /* unsigned >=  (aka HS) */
 #define ARM_CC 0x3   /* unsigned <   (aka LO) */
-#define ARM_AL 0xE
+/* NOT "ARM_AL": that name is already taken above for the same condition in its
+ * encoded position, bits [31:28]. Two macros with one name and different
+ * values worked only because every user happened to sit on the right side of
+ * the redefinition, and it made every build print a warning that could hide a
+ * real one. */
+#define ARM_COND_AL 0xE
 
 /* CMP Rn, Rm  -- register compare, base 0xE1500000. */
 static inline void arm_cmp_reg(ArmEmit *e, int Rn, int Rm)
