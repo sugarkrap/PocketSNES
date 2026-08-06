@@ -178,6 +178,132 @@ static void tr_index_incdec(ArmEmit *e, int rreg, int is_dec, int x8)
 	tr_add_cycles(e, ONE_CYCLE);
 }
 
+
+/*
+ * Inlined S9xGetByte/S9xGetWord fast path, split into probe and commit.
+ *
+ * THE SPLIT MATTERS. The MAP_LAST test must happen before any Cycles update:
+ * if the address turns out to be a handler we bail to the interpreter
+ * fallback, and that fallback runs Absolute()/LDA8() itself and charges
+ * MemSpeedx2 + MemorySpeed again. Anything charged before the bail is counted
+ * twice, and VERIFY diffs cycles.
+ *
+ * probe:  block = (addr >> 12) & 0xFFF ; p = Memory.Map[block]
+ *         bail if p < MAP_LAST                       [no side effects yet]
+ * commit: Cycles += MemorySpeed[block] (<<1 for a word -- S9xGetWord does ONE
+ *         lookup and charges double, it is not two byte accesses)
+ *         if (BlockIsRAM[block]) WaitAddress = PCAtOpcodeStart
+ *         load 1 or 2 bytes off p + (addr & 0xFFFF)
+ *
+ * Memory is a global, so Memory.Map / MemorySpeed / BlockIsRAM are link-time
+ * constants and go in as immediates. Rp/Rblock are r1/r2; TR_TMP/TR_TMP2 are
+ * clobbered.
+ */
+static unsigned tr_probe_map(ArmEmit *e, int Raddr, int Rblock, int Rp)
+{
+	arm_mov_shift(e, Rblock, Raddr, ARM_LSL, 8);      /* (addr >> 12) & 0xFFF */
+	arm_mov_shift(e, Rblock, Rblock, ARM_LSR, 20);
+	arm_mov32(e, TR_TMP, (uint32_t)(uintptr_t)Memory.Map);
+	arm_ldr_reg_lsl(e, Rp, TR_TMP, Rblock, 2);
+	arm_mov32(e, TR_TMP, (uint32_t)CMemory::MAP_LAST);
+	arm_cmp_reg(e, Rp, TR_TMP);
+	return arm_b_cc_fwd(e, ARM_CC);                   /* p < MAP_LAST -> handler */
+}
+
+static void tr_commit_load(ArmEmit *e, int Raddr, int Rblock, int Rp,
+                           int Rlo, int Rhi, int is_word)
+{
+	unsigned skip;
+
+	arm_mov32(e, TR_TMP, (uint32_t)(uintptr_t)Memory.MemorySpeed);
+	arm_ldrb_reg(e, TR_TMP, TR_TMP, Rblock);
+	if (is_word)
+		arm_mov_shift(e, TR_TMP, TR_TMP, ARM_LSL, 1);   /* MemorySpeed << 1 */
+	arm_ldr_imm(e, TR_TMP2, TR_CPU, offsetof(struct SCPUState, Cycles));
+	arm_add_reg(e, TR_TMP2, TR_TMP2, TR_TMP);
+	arm_str_imm(e, TR_TMP2, TR_CPU, offsetof(struct SCPUState, Cycles));
+
+	arm_mov32(e, TR_TMP, (uint32_t)(uintptr_t)Memory.BlockIsRAM);
+	arm_ldrb_reg(e, TR_TMP, TR_TMP, Rblock);
+	arm_cmp_imm(e, TR_TMP, 0);
+	skip = arm_b_cc_fwd(e, ARM_EQ);
+	arm_ldr_imm(e, TR_TMP, TR_CPU, offsetof(struct SCPUState, PCAtOpcodeStart));
+	arm_str_imm(e, TR_TMP, TR_CPU, offsetof(struct SCPUState, WaitAddress));
+	arm_patch_fwd(e, skip);
+
+	arm_mov_shift(e, TR_TMP, Raddr, ARM_LSL, 16);      /* addr & 0xFFFF */
+	arm_mov_shift(e, TR_TMP, TR_TMP, ARM_LSR, 16);
+	arm_add_reg(e, TR_TMP, Rp, TR_TMP);                /* p + off */
+	arm_ldrb_imm(e, Rlo, TR_TMP, 0);
+	if (is_word)
+		arm_ldrb_imm(e, Rhi, TR_TMP, 1);               /* FAST_LSB_WORD_ACCESS
+		                                                * is #undef'd: two
+		                                                * LDRBs, never an
+		                                                * unaligned LDRH */
+}
+
+/*
+ * LDA absolute ($AD). The operand is a COMPILE-TIME CONSTANT -- we translate a
+ * known PC -- so the 16-bit address goes in as an immediate and only the bank
+ * (icpu->ShiftedDB) is read at run time. That removes the operand fetch, not
+ * just its dispatch cost.
+ *
+ * Emits: native path, a branch over the fallback, then the bail landing pad.
+ * Returns the word index of that branch for the caller to patch AFTER it has
+ * emitted the interpreter fallback; the bail lands on the fallback.
+ */
+static unsigned tr_emit_lda_abs(ArmEmit *e, const uint8_t *code, unsigned off, int m8)
+{
+	uint32_t imm16 = (uint32_t)code[off + 1] | ((uint32_t)code[off + 2] << 8);
+	unsigned bail, straddle = 0, done;
+
+	/* PCAtOpcodeStart = pcbase + off -- the CPU_SHUTDOWN path reads it and
+	 * cpuexec.cpp sets it per opcode. */
+	arm_mov32(e, TR_TMP, off);
+	arm_add_reg(e, TR_TMP, TR_PCBASE, TR_TMP);
+	arm_str_imm(e, TR_TMP, TR_CPU, offsetof(struct SCPUState, PCAtOpcodeStart));
+
+	/* addr = imm16 + icpu->ShiftedDB */
+	arm_mov32(e, ARM_R0, imm16);
+	arm_ldr_imm(e, TR_TMP, TR_ICPU, offsetof(struct SICPU, ShiftedDB));
+	arm_add_reg(e, ARM_R0, ARM_R0, TR_TMP);
+
+	if (!m8) {
+		/* S9xGetWord punts on $00001FFF, where the word straddles a Map block
+		 * edge at the top of the WRAM mirror; so do we. */
+		arm_mov32(e, TR_TMP, 0x00001FFFu);
+		arm_cmp_reg(e, ARM_R0, TR_TMP);
+		straddle = arm_b_cc_fwd(e, ARM_EQ);
+	}
+
+	bail = tr_probe_map(e, ARM_R0, ARM_R2, ARM_R1);
+
+	/* Absolute()'s own operand fetch, charged only once we know we are keeping
+	 * the native path. */
+	arm_ldr_imm(e, TR_TMP, TR_CPU, offsetof(struct SCPUState, MemSpeedx2));
+	arm_ldr_imm(e, TR_TMP2, TR_CPU, offsetof(struct SCPUState, Cycles));
+	arm_add_reg(e, TR_TMP2, TR_TMP2, TR_TMP);
+	arm_str_imm(e, TR_TMP2, TR_CPU, offsetof(struct SCPUState, Cycles));
+
+	tr_commit_load(e, ARM_R0, ARM_R2, ARM_R1, ARM_R1, ARM_R2, !m8);
+
+	if (m8) {
+		arm_and_imm(e, TR_A, TR_A, 0xFF, 12);      /* keep A's high byte */
+		arm_orr_reg(e, TR_A, TR_A, ARM_R1);
+		tr_setzn8(e, ARM_R1);
+	} else {
+		arm_mov_shift(e, ARM_R2, ARM_R2, ARM_LSL, 8);
+		arm_orr_reg(e, TR_A, ARM_R1, ARM_R2);
+		tr_setzn16(e, TR_A);
+	}
+
+	done = arm_b_cc_fwd(e, ARM_AL);
+	arm_patch_fwd(e, bail);
+	if (!m8)
+		arm_patch_fwd(e, straddle);
+	return done;
+}
+
 /* Emit one opcode. Returns 1 if translated natively, 0 if not yet supported.
  * m8/x8 = current accumulator/index width (blocks are mode-specific). */
 static int tr_emit_op(ArmEmit *e, uint8_t op, int m8, int x8)
@@ -243,6 +369,13 @@ extern "C" void *dyn_translate_run(const uint8_t *code, int m8, int x8,
 		uint8_t op = code[off];
 		int ender = dyn_op_is_block_end(op);
 		tr_add_memspeed(e);
+		/*
+		 * LDA abs is NOT enabled for block execution yet: VERIFY on hardware
+		 * reports `op=AD field=A`, so the fast path computes the wrong
+		 * accumulator. It stays reachable from dyn_translate_ops (the verify
+		 * path) so the divergence can be chased, and out of the live CPU until
+		 * it reads clean. Flip this on in the same commit that fixes it.
+		 */
 		if (!tr_emit_op(e, op, m8, x8)) {
 			void *fn = op_fn_table[op];
 			if (!fn)
@@ -268,7 +401,18 @@ extern "C" void *dyn_translate_ops(const uint8_t *ops, int n, ArmEmit *e,
 	tr_prologue(e);
 	for (i = 0; i < n; i++) {
 		uint8_t op = ops[i];
-		if (!tr_emit_op(e, op, m8, x8)) {
+		if (op == 0xAD) {
+			/* The caller MUST supply an opcode table: the fast path can bail
+			 * at run time (I/O addresses), and the bail has to land on the
+			 * interpreter. Without one there is nowhere to go. */
+			void *fn = op_fn_table ? op_fn_table[op] : 0;
+			unsigned done;
+			if (!fn)
+				return 0;
+			done = tr_emit_lda_abs(e, ops, off, m8);
+			tr_emit_fallback(e, off, fn);
+			arm_patch_fwd(e, done);
+		} else if (!tr_emit_op(e, op, m8, x8)) {
 			void *fn = op_fn_table ? op_fn_table[op] : 0;
 			if (!fn)
 				return 0;   /* no native translation and no fallback */

@@ -40,9 +40,11 @@ typedef void (*stub_fn)(struct SRegisters *, struct SICPU *, struct SCPUState *)
  */
 static const uint8_t v_want[] = {
 	0x18 /*CLC*/, 0x38 /*SEC*/, 0xEA /*NOP*/,
-	0xE8 /*INX*/, 0xC8 /*INY*/, 0xCA /*DEX*/, 0x88 /*DEY*/
+	0xE8 /*INX*/, 0xC8 /*INY*/, 0xCA /*DEX*/, 0x88 /*DEY*/,
+	0xAD /*LDA abs*/
 };
 static uint8_t        v_is_native[256];
+static void          *v_optab[256];
 static void          *v_buf;
 static size_t         v_bufsz;
 static struct SRegisters s_reg;
@@ -113,8 +115,20 @@ void dyn_verify_after(unsigned char op, struct SRegisters *reg,
 	 * way to verify an opcode whose operand is baked into the code as an
 	 * immediate.
 	 */
+	/*
+	 * Give the translator the interpreter's opcode table for THIS mode. An
+	 * opcode with a memory fast path can bail at run time -- I/O addresses go
+	 * to the handler tier -- and the bail must land on the interpreter, just
+	 * as it does inside a real block. Verifying a stub without it would report
+	 * every LDA that touched a PPU register as a divergence.
+	 */
+	{
+		int i;
+		for (i = 0; i < 256; i++)
+			v_optab[i] = (void *)s_icpu.S9xOpcodes[i].S9xOpcode;
+	}
 	arm_emit_init(&e, v_buf, (unsigned)(v_bufsz / 4));
-	stub = dyn_translate_ops((const uint8_t *)s_cpu.PC, 1, &e, m8, x8, 0);
+	stub = dyn_translate_ops((const uint8_t *)s_cpu.PC, 1, &e, m8, x8, v_optab);
 	if (!stub || e.overflow) return;
 	__builtin___clear_cache((char *)v_buf, (char *)e.cur);
 	((stub_fn)stub)(&cr, &ci, &cc);
