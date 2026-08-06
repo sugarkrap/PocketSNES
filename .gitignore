@@ -3,3 +3,6 @@ PocketSNES
 PocketSNES.opk
 .opk_data
 PocketSNES-debug
+
+# Device run logs from dynarec/run-on-zaurus.sh (one per mode, always regenerated)
+zaurus-*.log
