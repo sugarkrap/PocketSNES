@@ -17,12 +17,15 @@
 # That is the only way out: this rootfs has no kill and no timeout applet, so
 # if the emulator ever wedges, the remaining option is the power button.
 BIN=${POCKETSNES_BIN:-/usr/local/bin/PocketSNES}
+DATA=${POCKETSNES_DATA:-/usr/local/share/pocketsnes}
+: ${HOME:=/root}
+export HOME
 MODE=${1:-interp}
 ROM=$2
 
 [ -x "$BIN" ] || exit 1
 
-cd /root
+cd "$DATA" 2>/dev/null || cd /root
 case "$MODE" in
 	dynarec)
 		# Block-driven execution. EXPERIMENTAL: this runs generated ARM as the
