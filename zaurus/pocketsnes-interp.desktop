@@ -1,0 +1,17 @@
+[Desktop Entry]
+Type=Application
+Name=PocketSNES
+Comment=SNES emulator (interpreter)
+Exec=/usr/sbin/matchbox-fbrun -y -n PocketSNES -- /usr/local/bin/pocketsnes-run interp
+Terminal=false
+Categories=Game;
+# matchbox-fbrun is NOT optional. Xfbdev maps /dev/fb0 and holds an EVIOCGRAB
+# on the keyboard and touchscreen, so a framebuffer app launched under X
+# renders but never receives a keystroke -- it looks alive and is completely
+# uncontrollable. fbrun stops the graphical session, hands over the console,
+# and restores everything afterwards. -y skips its confirmation dialog.
+#
+# Plain fbrun, no --qvga: every working run of this emulator on this board used
+# exactly this. --qvga calls FBIOPUT_VSCREENINFO to mode-switch the w100 panel,
+# which is both what sal/linux/sal.c is written to avoid and a change away from
+# the only configuration observed to display correctly.

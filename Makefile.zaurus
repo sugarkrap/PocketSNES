@@ -1,0 +1,175 @@
+# Sharp Zaurus SL-C860 (piko ROM). PXA255, ARMv5TE XScale, soft-float,
+# uClibc, fbcon-only -- same target as ../../Makefile.zaurus (gmenunx
+# itself). See that file's header for the general shape of this problem;
+# this one has the same "SDL isn't in the cross toolchain's own sysroot"
+# issue, plus one more: upstream's Makefile hardcodes -D__DINGUX__, which
+# only feeds sal/linux/include/sal.h's SAL_INPUT_INDEX_* button-index
+# table (GCW0/RG350's hardcoded /dev/input keycodes -- irrelevant on the
+# Zaurus, which has its own input path already handled by gmenunx/SDL).
+# There is no MIPS/Dingux assembly anywhere in this tree (pocketsnes,
+# snes9x, sal, menu are all portable C/C++) -- checked with:
+#   grep -rlE '__DINGUX__|__mips__|mipsel|dingux' .
+# which only turns up Makefile and sal/linux/include/sal.h, both handled
+# by simply not defining __DINGUX__ and taking the #else branch (a plain
+# 0..14 SDL joystick-index mapping) instead.
+#
+# NOT YET ADDRESSED (deliberately, for this first build+deploy pass --
+# gmenunx.mk isn't running anything on-device yet either):
+#   - SAL_SCREEN_WIDTH/HEIGHT are hardcoded 320x240 (sal/linux/include/
+#     sal.h) for a GCW0/RG350-class screen. The Zaurus panel is larger;
+#     this will run letterboxed/small rather than filling the screen.
+#     Revisit once there's an actual device run to look at.
+#   - sal/linux/sal.c's joystick/keyboard device paths were written for
+#     Dingux's fixed /dev/input layout, not verified against the
+#     Zaurus's input devices yet.
+#
+# This is a plain override Makefile, not an `include Makefile.zaurus`-
+# style include of the upstream Makefile (unlike gmenunx.mk, upstream's
+# Makefile wasn't written with += composition in mind -- CFLAGS/LDFLAGS
+# are single `=` assignments that build in -D__DINGUX__ and a bare
+# `-lpng -lz` with no -L for either). Redeclaring the whole ruleset here
+# once is simpler than fighting Make's override-precedence rules for a
+# Makefile this small.
+#
+# Build with piko's cross toolchain in PATH, from a piko checkout next to
+# this one (override PIKO_DIR if it lives elsewhere):
+#   export PATH="../../../../../../toolchain/x-tools/arm-unknown-linux-uclibcgnueabi/bin:$PATH"
+#   make -f Makefile.zaurus PIKO_DIR=/path/to/piko
+
+# Named PocketSNES (not lowercase) to avoid colliding with the pocketsnes/
+# source subdirectory already in this tree -- same reason upstream did.
+TARGET = PocketSNES
+
+PIKO_DIR   ?= ../../../../../..
+SDL_STAGE  := $(PIKO_DIR)/userspace/stage-sdl
+DEPS_STAGE := $(PIKO_DIR)/userspace/stage-target
+
+CROSS_COMPILE ?= arm-unknown-linux-uclibcgnueabi-
+CC  := $(CROSS_COMPILE)gcc
+CXX := $(CROSS_COMPILE)g++
+STRIP := $(CROSS_COMPILE)strip
+
+# Both -I's needed: sal/linux/sal.c does `#include <SDL/SDL.h>`, while
+# sal/linux/sal_sound.c does `#include <SDL.h>` -- same tree, two styles.
+SDL_CFLAGS := -I$(SDL_STAGE)/usr/include/SDL -I$(SDL_STAGE)/usr/include
+SDL_LIBS   := -L$(SDL_STAGE)/usr/lib -lSDL
+
+ifdef V
+	CMD:=
+	SUM:=@\#
+else
+	CMD:=@
+	SUM:=@echo
+endif
+
+INCLUDE = -I pocketsnes \
+		-I sal/linux/include -I sal/include \
+		-I pocketsnes/include \
+		-I menu -I pocketsnes/linux -I pocketsnes/snes9x -I dynarec \
+		-I$(DEPS_STAGE)/usr/include -I$(DEPS_STAGE)/usr/include/libpng16
+
+# Same -Os + armv5te/xscale/soft-float choice as ../../Makefile.zaurus.
+# Dropped vs upstream: -D__DINGUX__ (see header comment above) and
+# upstream's -O3/-ffast-math (going with piko's established -Os instead,
+# consistent with the rest of this device's userspace; revisit if
+# PocketSNES turns out too slow at -Os once there's a device run to time).
+CFLAGS = $(INCLUDE) -DRC_OPTIMIZED -D__LINUX__ \
+		-Os -march=armv5te -mtune=xscale -mfloat-abi=soft \
+		-pipe -ffunction-sections $(SDL_CFLAGS)
+
+# -std=gnu++03: this 2013-era codebase predates C++11 and relies on
+# things C++11 changed the rules on -- apu.cpp's `~0` all-ones sentinel
+# in a uint32 lookup table hits C++11's *mandatory* narrowing-in-{}-init
+# diagnostic (ill-formed regardless of -Wno-narrowing, per the standard;
+# that rule simply doesn't exist pre-C++11) and register-storage-class
+# variables throughout snes9x/. GCC 13's default -std= (gnu++17) doesn't
+# match the dialect this was written against; go back to the one it was.
+CXXFLAGS = $(CFLAGS) -std=gnu++03 -fno-exceptions -fno-rtti
+
+# `make PROFILE=1` builds the dynarec hotness profiler into the CPU dispatch
+# (opcode histogram + hot-block counting), gated at runtime by PIKO_DYN_PROFILE.
+# Default builds omit it entirely -- the hot loop is byte-identical without it.
+ifdef PROFILE
+CFLAGS   += -DPIKO_DYNAREC_PROFILE
+CXXFLAGS += -DPIKO_DYNAREC_PROFILE
+endif
+
+# `make VERIFY=1` builds the dynarec run-both-and-diff validator into the CPU
+# loop (gated at runtime by PIKO_DYN_VERIFY): each translatable opcode's
+# generated block is run on a scratch copy and diffed against the interpreter.
+# The interpreter stays authoritative; nothing about behaviour/timing changes.
+ifdef VERIFY
+CFLAGS   += -DPIKO_DYNAREC_VERIFY
+CXXFLAGS += -DPIKO_DYNAREC_VERIFY
+endif
+
+# `make EXEC=1` builds block-driven execution (gated at runtime by PIKO_DYN_EXEC):
+# translated blocks actually drive the CPU. EXPERIMENTAL -- runs generated code
+# as the live CPU. Default builds omit it (interpreter only).
+ifdef EXEC
+CFLAGS   += -DPIKO_DYNAREC_EXEC
+CXXFLAGS += -DPIKO_DYNAREC_EXEC
+endif
+
+# `make WRAMSTAT=1` measures how often the game writes over WRAM that holds
+# code (gated at runtime by PIKO_DYN_WRAM), which is the one number that
+# decides how block invalidation has to be built -- see dynarec_wram.h.
+#
+# It implies EXEC, and not for convenience: the code-page map is built from the
+# block starts dyn_exec_step currently turns away, so without block-driven
+# dispatch there is nothing to mark and the run would report zero code pages
+# while looking perfectly healthy.
+ifdef WRAMSTAT
+CFLAGS   += -DPIKO_DYNAREC_EXEC -DPIKO_DYNAREC_WRAMSTAT
+CXXFLAGS += -DPIKO_DYNAREC_EXEC -DPIKO_DYNAREC_WRAMSTAT
+endif
+
+# `make NOCOUNT=1` compiles out the dynarec's hot-path counters. Ablation only:
+# it makes the diagnostics read zero, and says so in the report. See
+# dynarec_exec.h.
+# `make BLOCKSTATS=1` adds the per-block native/fallback instruction accounting
+# to the report. Off by default because it costs 4.5% of the block path: two
+# array loads and two global updates on every block run. See dynarec_exec.cpp.
+ifdef BLOCKSTATS
+CFLAGS   += -DPIKO_DYN_BLOCKSTATS
+CXXFLAGS += -DPIKO_DYN_BLOCKSTATS
+endif
+
+ifdef NOCOUNT
+CFLAGS   += -DPIKO_DYN_NOCOUNT
+CXXFLAGS += -DPIKO_DYN_NOCOUNT
+endif
+
+LDFLAGS = $(CXXFLAGS) \
+		-L$(DEPS_STAGE)/usr/lib -Wl,-rpath-link=$(DEPS_STAGE)/usr/lib \
+		-Wl,-rpath-link=$(SDL_STAGE)/usr/lib \
+		-Wl,-rpath,/mnt/card/.zaurus/usr/lib \
+		-lpthread -lz -lpng -lm $(SDL_LIBS)
+
+SOURCE = pocketsnes/snes9x menu sal/linux sal dynarec
+SRC_CPP = $(foreach dir, $(SOURCE), $(wildcard $(dir)/*.cpp))
+SRC_C   = $(foreach dir, $(SOURCE), $(wildcard $(dir)/*.c))
+OBJ_CPP = $(patsubst %.cpp, %.o, $(SRC_CPP))
+OBJ_C   = $(patsubst %.c, %.o, $(SRC_C))
+OBJS    = $(OBJ_CPP) $(OBJ_C)
+
+.PHONY : all
+all : $(TARGET)
+
+$(TARGET) : $(OBJS)
+	$(SUM) "  LD      $@"
+	$(CMD)$(CXX) $(CXXFLAGS) $^ $(LDFLAGS) -o $@-debug
+	$(CMD)$(STRIP) $@-debug -o $@
+
+%.o: %.c
+	$(SUM) "  CC      $@"
+	$(CMD)$(CC) $(CFLAGS) -c $< -o $@
+
+%.o: %.cpp
+	$(SUM) "  CXX     $@"
+	$(CMD)$(CXX) $(CXXFLAGS) -c $< -o $@
+
+.PHONY : clean
+clean :
+	$(SUM) "  CLEAN   ."
+	$(CMD)rm -f $(OBJS) $(TARGET) $(TARGET)-debug

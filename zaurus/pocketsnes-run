@@ -1,0 +1,47 @@
+#!/bin/sh
+# pocketsnes-run -- launch PocketSNES on the Zaurus from the desktop.
+#
+#   pocketsnes-run interp|dynarec [ROM]
+#
+# ONE BINARY, one environment variable. Both desktop entries run the same
+# /root/PocketSNES-dyn; "interpreter" simply does not set PIKO_DYN_EXEC. That
+# is deliberate -- it is the same A/B the whole dynarec investigation was
+# measured with, so what you play is exactly what was benchmarked, and the two
+# entries can never drift apart the way two builds would.
+#
+# NOT wrapped in matchbox-fbrun here: the .desktop files do that. Doing it in
+# both places would stop X twice.
+#
+# No PIKO_MAX_SECONDS on purpose. This is the interactive launcher, so it runs
+# until you quit -- SELECT+START opens the menu, "Exit Application" leaves.
+# That is the only way out: this rootfs has no kill and no timeout applet, so
+# if the emulator ever wedges, the remaining option is the power button.
+BIN=/root/PocketSNES-dyn
+MODE=${1:-interp}
+ROM=$2
+
+[ -x "$BIN" ] || exit 1
+
+cd /root
+case "$MODE" in
+	dynarec)
+		# Block-driven execution. EXPERIMENTAL: this runs generated ARM as the
+		# live CPU. It also requires $BIN to be an EXEC=1 build -- a default
+		# build ignores this variable and quietly runs the interpreter, which
+		# looks identical from the desktop.
+		PIKO_DYN_EXEC=1
+		export PIKO_DYN_EXEC
+		;;
+	interp)
+		;;
+	*)
+		exit 2
+		;;
+esac
+
+# With no ROM argument the emulator opens its own browser, which is what makes
+# this useful for testing more than one game.
+if [ -n "$ROM" ]; then
+	exec "$BIN" "$ROM"
+fi
+exec "$BIN"
