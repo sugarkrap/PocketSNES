@@ -16,7 +16,7 @@
 # until you quit -- SELECT+START opens the menu, "Exit Application" leaves.
 # That is the only way out: this rootfs has no kill and no timeout applet, so
 # if the emulator ever wedges, the remaining option is the power button.
-BIN=/root/PocketSNES-dyn
+BIN=${POCKETSNES_BIN:-/usr/local/bin/PocketSNES}
 MODE=${1:-interp}
 ROM=$2
 
