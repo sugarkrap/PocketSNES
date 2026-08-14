@@ -1,8 +1,8 @@
 [Desktop Entry]
 Type=Application
 Name=PocketSNES
-Comment=SNES emulator (interpreter)
-Exec=/usr/local/bin/pocketsnes-run interp
+Comment=SNES emulator
+Exec=/usr/local/bin/pocketsnes-run dynarec
 X-Piko-Heavy=true
 X-Piko-Heavy-Reason=PocketSNES needs the framebuffer and the input devices to itself.
 X-Piko-Drivers=fb
