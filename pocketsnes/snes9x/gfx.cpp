@@ -38,6 +38,15 @@
  * Super NES and Super Nintendo Entertainment System are trademarks of
  * Nintendo Co., Limited and its subsidiary companies.
  */
+#include <stdlib.h>
+#include <stdio.h>
+#include <time.h>
+#include <sys/time.h>
+
+extern unsigned long piko_ppu_usec;
+extern unsigned long piko_obj_usec;
+extern unsigned long piko_obj_calls;
+extern int piko_prof;
 #include "snes9x.h"
 
 #include "memmap.h"
@@ -679,6 +688,35 @@ void RenderLine (uint8 C)
 
 void S9xEndScreenRefresh()
 {
+	if (piko_prof > 0)
+	{
+		static unsigned long frames = 0;
+		static time_t started = 0;
+		time_t now = time(NULL);
+
+		if (started == 0)
+			started = now;
+		frames++;
+
+		if ((frames % 60) == 0)
+		{
+			unsigned long nonzero = 0;
+			int x, y;
+
+			for (y = 0; y < 224; y++)
+			{
+				uint16 *row = (uint16 *) ((uint8 *) GFX.Screen + y * GFX.Pitch);
+				for (x = 0; x < 256; x++)
+					if (row[x])
+						nonzero++;
+			}
+
+			fprintf(stderr, "pocketsnes: frame %lu after %lds, ppu_ms=%lu obj_ms=%lu obj_calls=%lu nonzero=%lu\n",
+				frames, (long) (now - started),
+				piko_ppu_usec / 1000, piko_obj_usec / 1000, piko_obj_calls, nonzero);
+		}
+	}
+
     IPPU.HDMAStarted = FALSE;
 
 //RC
@@ -903,7 +941,26 @@ void S9xSetupOBJ ()
     IPPU.OBJChanged = FALSE;
 }
 
+static void DrawOBJSInner (bool8_32 OnMain, uint8 D);
+
 void DrawOBJS (bool8_32 OnMain = FALSE, uint8 D = 0)
+{
+	struct timeval a, b;
+
+	if (piko_prof <= 0)
+	{
+		DrawOBJSInner(OnMain, D);
+		return;
+	}
+
+	gettimeofday(&a, NULL);
+	DrawOBJSInner(OnMain, D);
+	gettimeofday(&b, NULL);
+	piko_obj_usec += (b.tv_sec - a.tv_sec) * 1000000UL + (b.tv_usec - a.tv_usec);
+	piko_obj_calls++;
+}
+
+static void DrawOBJSInner (bool8_32 OnMain, uint8 D)
 {
     uint32 O;
     uint32 BaseTile, Tile;
@@ -3209,7 +3266,33 @@ static void S9xDisplayString (const char *string)
     }
 }
 
-void S9xUpdateScreen () // ~30-50ms! (called from FLUSH_REDRAW())
+unsigned long piko_ppu_usec = 0;
+unsigned long piko_obj_usec = 0;
+unsigned long piko_obj_calls = 0;
+int piko_prof = -1;
+
+static void S9xUpdateScreenInner (void);
+
+void S9xUpdateScreen ()
+{
+	struct timeval a, b;
+
+	if (piko_prof < 0)
+		piko_prof = (getenv("PIKO_PROF") != NULL);
+
+	if (!piko_prof)
+	{
+		S9xUpdateScreenInner();
+		return;
+	}
+
+	gettimeofday(&a, NULL);
+	S9xUpdateScreenInner();
+	gettimeofday(&b, NULL);
+	piko_ppu_usec += (b.tv_sec - a.tv_sec) * 1000000UL + (b.tv_usec - a.tv_usec);
+}
+
+static void S9xUpdateScreenInner ()
 {
     int32 x2 = 1;
 

@@ -443,6 +443,18 @@ int Run(int sound)
 {
   	int skip=0, done=0, doneLast=0,aim=0,i;
 	Settings.NextAPUEnabled = Settings.APUEnabled = sound;
+
+	if (getenv("PIKO_FRAMESKIP"))
+		mMenuOptions.frameSkip = atoi(getenv("PIKO_FRAMESKIP"));
+	if (getenv("PIKO_SOUNDRATE"))
+		mMenuOptions.soundRate = atoi(getenv("PIKO_SOUNDRATE"));
+	if (getenv("PIKO_STEREO"))
+		mMenuOptions.stereo = atoi(getenv("PIKO_STEREO"));
+
+	fprintf(stderr, "PIKO: sound=%d rate=%u stereo=%u frameskip=%u\n",
+		sound, mMenuOptions.soundRate, mMenuOptions.stereo,
+		mMenuOptions.frameSkip);
+
 	sal_TimerInit(Settings.FrameTime);
 	done=sal_TimerRead()-1;
 
@@ -899,7 +911,7 @@ int mainEntry(int argc, char* argv[])
 			sal_VideoFlip(1);
 			sal_VideoClear(0);
 			sal_VideoFlip(1);
-			if(mMenuOptions.soundEnabled) 	
+			if(mMenuOptions.soundEnabled && getenv("PIKO_NOSOUND") == NULL)
 				RunSound();
 			else	RunNoSound();
 

@@ -42,9 +42,12 @@ case "$MODE" in
 		;;
 esac
 
+LOG=${POCKETSNES_LOG:-/mnt/card/.zaurus/var/log/pocketsnes.log}
+mkdir -p "${LOG%/*}" 2>/dev/null
+
 # With no ROM argument the emulator opens its own browser, which is what makes
 # this useful for testing more than one game.
 if [ -n "$ROM" ]; then
-	exec "$BIN" "$ROM"
+	exec "$BIN" "$ROM" >>"$LOG" 2>&1
 fi
-exec "$BIN"
+exec "$BIN" >>"$LOG" 2>&1
