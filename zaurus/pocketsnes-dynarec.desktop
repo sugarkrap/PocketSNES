@@ -2,7 +2,11 @@
 Type=Application
 Name=PocketSNES (dynarec)
 Comment=SNES emulator, dynamic recompiler armed (experimental)
-Exec=/usr/sbin/matchbox-fbrun -y -n PocketSNES-dynarec -- /usr/local/bin/pocketsnes-run dynarec
+Exec=/usr/local/bin/pocketsnes-run dynarec
+X-Piko-Heavy=true
+X-Piko-Heavy-Reason=PocketSNES needs the framebuffer and the input devices to itself.
+X-Piko-Drivers=fb
+X-Piko-Video=qvga
 Terminal=false
 Categories=Game;
 # matchbox-fbrun is NOT optional. Xfbdev maps /dev/fb0 and holds an EVIOCGRAB
